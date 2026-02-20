@@ -9,6 +9,7 @@ from felundchat.crypto import make_token, verify_message_mac, verify_token
 from felundchat.models import ChatMessage, Peer, State, now_ts
 from felundchat.persistence import save_state
 from felundchat.transport import (
+    canonical_peer_addr,
     parse_hostport,
     public_addr_hint,
     read_frame,
@@ -92,9 +93,10 @@ class GossipNode:
                     await write_frame(writer, {"t": "ERROR", "err": "Auth failed"})
                     return
 
+                resolved_addr = self._resolve_peer_addr(peername, listen_addr)
                 if listen_addr:
                     self.state.peers[peer_node_id] = Peer(
-                        node_id=peer_node_id, addr=listen_addr, last_seen=now_ts()
+                        node_id=peer_node_id, addr=resolved_addr, last_seen=now_ts()
                     )
                 else:
                     if peer_node_id in self.state.peers:
@@ -212,6 +214,24 @@ class GossipNode:
             if m.msg_id not in self.state.messages:
                 self.state.messages[m.msg_id] = m
 
+    def _resolve_peer_addr(self, peername: Any, listen_addr: str) -> str:
+        if not listen_addr:
+            return ""
+
+        try:
+            adv_host, adv_port = parse_hostport(listen_addr)
+        except Exception:
+            return listen_addr
+
+        observed_host = ""
+        if isinstance(peername, tuple) and len(peername) >= 1:
+            observed_host = str(peername[0])
+
+        if observed_host:
+            return canonical_peer_addr(observed_host, adv_port)
+
+        return canonical_peer_addr(adv_host, adv_port)
+
     async def connect_and_sync(self, peer_addr: str, circle_id: str) -> None:
         circle = self.state.circles.get(circle_id)
         if not circle:
@@ -220,7 +240,8 @@ class GossipNode:
         host, port = parse_hostport(peer_addr)
         try:
             reader, writer = await asyncio.open_connection(host, port)
-        except Exception:
+        except Exception as e:
+            print(f"[sync] {peer_addr} {circle_id}: connect failed ({type(e).__name__}: {e})")
             return
 
         try:
