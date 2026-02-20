@@ -568,7 +568,36 @@ def choose_circle_id(state: State, preferred: Optional[str] = None) -> Optional[
         print("Invalid selection.")
 
 
-async def interactive_chat(node: GossipNode, state: State, selected_circle_id: Optional[str]) -> None:
+async def sync_circle_once(
+    node: GossipNode,
+    state: State,
+    circle_id: str,
+    extra_peers: Optional[List[str]] = None,
+    limit: int = 5,
+) -> None:
+    async with node._lock:
+        peer_addrs = [p.addr for p in node.known_peers_for_circle(circle_id)]
+    if extra_peers:
+        peer_addrs.extend(extra_peers)
+
+    seen_addrs: Set[str] = set()
+    unique_addrs: List[str] = []
+    for addr in peer_addrs:
+        if not addr or addr in seen_addrs:
+            continue
+        seen_addrs.add(addr)
+        unique_addrs.append(addr)
+
+    for addr in unique_addrs[:limit]:
+        await node.connect_and_sync(addr, circle_id)
+
+
+async def interactive_chat(
+    node: GossipNode,
+    state: State,
+    selected_circle_id: Optional[str],
+    bootstrap_peer: Optional[str] = None,
+) -> None:
     circle_id = choose_circle_id(state, selected_circle_id)
     if not circle_id:
         print("No circles available.")
@@ -636,7 +665,9 @@ async def interactive_chat(node: GossipNode, state: State, selected_circle_id: O
             async with node._lock:
                 state.messages[msg_id] = msg
                 save_state(state)
+            seen.add(msg_id)
             print(render_message(msg))
+            await sync_circle_once(node, state, circle_id, extra_peers=[bootstrap_peer] if bootstrap_peer else None)
     finally:
         node.stop()
         watcher.cancel()
@@ -702,15 +733,31 @@ async def run_interactive_flow() -> None:
     await node.start_server()
     gossip_task = asyncio.create_task(node.gossip_loop(interval_s=5))
 
+    bootstrap_task: Optional[asyncio.Task[Any]] = None
+    if mode == "client" and peer:
+        async def periodic_bootstrap() -> None:
+            while not node._stop_event.is_set():
+                await node.connect_and_sync(peer, selected_circle_id or "")
+                try:
+                    await asyncio.wait_for(node._stop_event.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    pass
+
+        bootstrap_task = asyncio.create_task(periodic_bootstrap())
+
     try:
         if mode == "client" and peer:
             await node.connect_and_sync(peer, selected_circle_id or "")
-        await interactive_chat(node, state, selected_circle_id)
+        await interactive_chat(node, state, selected_circle_id, bootstrap_peer=peer)
     finally:
         node.stop()
         gossip_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await gossip_task
+        if bootstrap_task:
+            bootstrap_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await bootstrap_task
         await node.stop_server()
 
 
