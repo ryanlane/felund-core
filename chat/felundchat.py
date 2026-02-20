@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 
-APP_DIR = Path.home() / ".gossipchat"
+APP_DIR = Path.home() / ".felundchat"
 STATE_FILE = APP_DIR / "state.json"
 MSG_MAX = 16_384  # bytes per frame, keep it small
 
@@ -457,10 +457,10 @@ def cmd_invite(args: argparse.Namespace) -> None:
     print(f" circle_secret (hex): {secret_hex}")
     print()
     print("Share this join command with a friend:")
-    print(f"  python gossipchat.py join --secret {secret_hex} --peer {bootstrap}")
+    print(f"  python felundchat.py join --secret {secret_hex} --peer {bootstrap}")
     print()
     print("Then run your node:")
-    print("  python gossipchat.py run")
+    print("  python felundchat.py run")
 
 
 def cmd_join(args: argparse.Namespace) -> None:
@@ -481,7 +481,7 @@ def cmd_join(args: argparse.Namespace) -> None:
 
     asyncio.run(_bootstrap())
     print("Bootstrap attempted. Now run:")
-    print("  python gossipchat.py run")
+    print("  python felundchat.py run")
 
 
 def cmd_peers(args: argparse.Namespace) -> None:
@@ -559,7 +559,7 @@ def cmd_inbox(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="gossipchat", description="Simple gossip + direct connect chat")
+    p = argparse.ArgumentParser(prog="felundchat", description="Simple gossip + direct connect chat")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("init", help="Initialize local node")
