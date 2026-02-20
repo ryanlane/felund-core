@@ -23,6 +23,7 @@ import dataclasses
 import hashlib
 import hmac
 import json
+import base64
 import secrets
 import socket
 import time
@@ -59,6 +60,29 @@ def parse_hostport(s: str) -> Tuple[str, int]:
 
 def canonical_peer_addr(host: str, port: int) -> str:
     return f"{host}:{port}"
+
+def make_felund_code(secret_hex: str, peer_addr: str) -> str:
+    payload = {"v": 1, "secret": secret_hex, "peer": peer_addr}
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return "felund1." + base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+def parse_felund_code(code: str) -> Tuple[str, str]:
+    code = code.strip()
+    if not code.startswith("felund1."):
+        raise ValueError("Invalid code prefix")
+    token = code.split(".", 1)[1]
+    padding = "=" * (-len(token) % 4)
+    raw = base64.urlsafe_b64decode((token + padding).encode("ascii"))
+    payload = json.loads(raw.decode("utf-8"))
+    if payload.get("v") != 1:
+        raise ValueError("Unsupported code version")
+    secret_hex = str(payload.get("secret", "")).strip().lower()
+    peer_addr = str(payload.get("peer", "")).strip()
+    if not secret_hex or not peer_addr:
+        raise ValueError("Code missing fields")
+    bytes.fromhex(secret_hex)
+    parse_hostport(peer_addr)
+    return secret_hex, peer_addr
 
 
 @dataclasses.dataclass
@@ -714,13 +738,24 @@ async def run_interactive_flow() -> None:
         save_state(state)
 
         bootstrap = public_addr_hint(state.node.bind, state.node.port)
+        invite_code = make_felund_code(circle.secret_hex, bootstrap)
         print()
         print("Invite generated:")
-        print(f" secret: {circle.secret_hex}")
-        print(f" peer  : {bootstrap}")
+        print(f" felund code: {invite_code}")
+        print(" (contains both secret + peer)")
     else:
-        secret_hex = input("Paste circle secret: ").strip().lower()
-        peer = input("Paste bootstrap peer host:port: ").strip()
+        code_or_secret = input("Paste felund code (or legacy secret): ").strip()
+        try:
+            if code_or_secret.startswith("felund1."):
+                secret_hex, peer = parse_felund_code(code_or_secret)
+            else:
+                secret_hex = code_or_secret.lower()
+                bytes.fromhex(secret_hex)
+                peer = input("Paste bootstrap peer host:port: ").strip()
+                parse_hostport(peer)
+        except Exception as e:
+            print(f"Invalid invite data: {e}")
+            return
 
         secret = bytes.fromhex(secret_hex)
         circle_id = sha256_hex(secret)[:24]
@@ -787,12 +822,15 @@ def cmd_invite(args: argparse.Namespace) -> None:
     save_state(state)
 
     bootstrap = public_addr_hint(state.node.bind, state.node.port)
+    invite_code = make_felund_code(circle.secret_hex, bootstrap)
     print("Circle created.")
     print(f" circle_id   : {circle.circle_id}")
     print(f" circle_secret (hex): {circle.secret_hex}")
+    print(f" felund_code : {invite_code}")
     print()
     print("Share this join command with a friend:")
-    print(f"  python felundchat.py join --secret {circle.secret_hex} --peer {bootstrap}")
+    print(f"  python felundchat.py join --code {invite_code}")
+    print("  (or legacy: --secret ... --peer ...)")
     print()
     print("Then run your node:")
     print("  python felundchat.py run")
@@ -800,7 +838,20 @@ def cmd_invite(args: argparse.Namespace) -> None:
 
 def cmd_join(args: argparse.Namespace) -> None:
     state = load_state()
-    secret_hex = args.secret.strip().lower()
+    try:
+        if args.code:
+            secret_hex, peer_addr = parse_felund_code(args.code)
+        else:
+            if not args.secret or not args.peer:
+                print("Provide --code, or both --secret and --peer.")
+                return
+            secret_hex = args.secret.strip().lower()
+            peer_addr = args.peer.strip()
+            bytes.fromhex(secret_hex)
+            parse_hostport(peer_addr)
+    except Exception as e:
+        print(f"Invalid join input: {e}")
+        return
     secret = bytes.fromhex(secret_hex)
     circle_id = sha256_hex(secret)[:24]
     state.circles[circle_id] = Circle(circle_id=circle_id, secret_hex=secret_hex)
@@ -808,11 +859,11 @@ def cmd_join(args: argparse.Namespace) -> None:
     save_state(state)
 
     # Save bootstrap as a "peer" placeholder (node_id unknown until first sync)
-    print(f"Joined circle {circle_id}. Bootstrapping via {args.peer} ...")
+    print(f"Joined circle {circle_id}. Bootstrapping via {peer_addr} ...")
     node = GossipNode(state)
 
     async def _bootstrap():
-        await node.connect_and_sync(args.peer, circle_id)
+        await node.connect_and_sync(peer_addr, circle_id)
 
     asyncio.run(_bootstrap())
     print("Bootstrap attempted. Now run:")
@@ -838,7 +889,6 @@ def cmd_peers(args: argparse.Namespace) -> None:
         print("Circles:")
         for cid in sorted(state.circles.keys()):
             print(f" - {cid} (members={len(state.circle_members.get(cid, set()))})")
-
 
 def cmd_send(args: argparse.Namespace) -> None:
     state = load_state()
@@ -913,9 +963,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("invite", help="Create a new circle and print an invite")
     sp.set_defaults(func=cmd_invite)
 
-    sp = sub.add_parser("join", help="Join a circle using secret + a bootstrap peer")
-    sp.add_argument("--secret", required=True, help="Circle secret hex (shared)")
-    sp.add_argument("--peer", required=True, help="Bootstrap peer host:port")
+    sp = sub.add_parser("join", help="Join a circle using a felund code or secret + bootstrap peer")
+    sp.add_argument("--code", help="Single felund invite code")
+    sp.add_argument("--secret", help="Circle secret hex (shared)")
+    sp.add_argument("--peer", help="Bootstrap peer host:port")
     sp.set_defaults(func=cmd_join)
 
     sp = sub.add_parser("run", help="Run server + gossip loop")
