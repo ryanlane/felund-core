@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import secrets
+import sys
 import time
 from typing import List, Optional, Set
 
@@ -91,6 +92,12 @@ async def interactive_chat(
 
     seen: Set[str] = set()
 
+    def prompt_text() -> str:
+        return f"[{circle_id[:8]}] > "
+
+    def redraw_prompt() -> None:
+        print(prompt_text(), end="", flush=True)
+
     async def watch_incoming() -> None:
         while not node._stop_event.is_set():
             async with node._lock:
@@ -100,7 +107,9 @@ async def interactive_chat(
                 if m.msg_id in seen:
                     continue
                 seen.add(m.msg_id)
+                sys.stdout.write("\r")
                 print(render_message(m))
+                redraw_prompt()
             await asyncio.sleep(1)
 
     watcher = asyncio.create_task(watch_incoming())
@@ -109,7 +118,8 @@ async def interactive_chat(
 
     try:
         while True:
-            raw = await asyncio.to_thread(input, f"[{circle_id[:8]}] > ")
+            redraw_prompt()
+            raw = await asyncio.to_thread(input)
             text = raw.strip()
             if not text:
                 continue
