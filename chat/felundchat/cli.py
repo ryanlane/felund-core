@@ -6,6 +6,7 @@ import secrets
 
 from felundchat.chat import (
     create_circle,
+    ensure_default_channel,
     render_message,
     run_interactive_flow,
 )
@@ -74,6 +75,7 @@ def cmd_join(args: argparse.Namespace) -> None:
     circle_id = sha256_hex(secret)[:24]
     state.circles[circle_id] = Circle(circle_id=circle_id, secret_hex=secret_hex)
     state.circle_members.setdefault(circle_id, set()).add(state.node.node_id)
+    ensure_default_channel(state, circle_id)
     save_state(state)
 
     print(f"Joined circle {circle_id}. Bootstrapping via {peer_addr} ...")
@@ -116,6 +118,12 @@ def cmd_send(args: argparse.Namespace) -> None:
         return
 
     text = args.text
+    channel_id = args.channel
+    ensure_default_channel(state, cid)
+    if channel_id not in state.channels.get(cid, {}):
+        print(f"Unknown channel #{channel_id}.")
+        return
+
     created = now_ts()
     msg_id = sha256_hex(
         f"{state.node.node_id}|{created}|{secrets.token_hex(8)}".encode("utf-8")
@@ -123,6 +131,7 @@ def cmd_send(args: argparse.Namespace) -> None:
     msg = ChatMessage(
         msg_id=msg_id,
         circle_id=cid,
+        channel_id=channel_id,
         author_node_id=state.node.node_id,
         display_name=state.node.display_name,
         created_ts=created,
@@ -160,7 +169,8 @@ def cmd_inbox(args: argparse.Namespace) -> None:
     if cid not in state.circles:
         print("Unknown circle_id")
         return
-    msgs = [m for m in state.messages.values() if m.circle_id == cid]
+    channel_id = args.channel
+    msgs = [m for m in state.messages.values() if m.circle_id == cid and m.channel_id == channel_id]
     msgs.sort(key=lambda m: (m.created_ts, m.msg_id))
     for m in msgs[-args.limit:]:
         print(render_message(m))
@@ -196,11 +206,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("send", help="Broadcast a text message to a circle")
     sp.add_argument("--circle-id", required=True, help="Circle id")
+    sp.add_argument("--channel", default="general", help="Channel id (default: general)")
     sp.add_argument("text", help="Message text")
     sp.set_defaults(func=cmd_send)
 
     sp = sub.add_parser("inbox", help="Show recent messages for a circle")
     sp.add_argument("--circle-id", required=True)
+    sp.add_argument("--channel", default="general")
     sp.add_argument("--limit", type=int, default=50)
     sp.set_defaults(func=cmd_inbox)
 

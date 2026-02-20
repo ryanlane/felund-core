@@ -38,8 +38,19 @@ class ChatMessage:
     author_node_id: str
     created_ts: int
     text: str
+    channel_id: str = "general"
     display_name: str = ""
     mac: str = ""
+
+
+@dataclasses.dataclass
+class Channel:
+    channel_id: str
+    circle_id: str
+    created_by: str
+    created_ts: int
+    access_mode: str = "public"  # public | key | invite
+    key_hash: str = ""
 
 
 @dataclasses.dataclass
@@ -49,6 +60,9 @@ class State:
     peers: Dict[str, Peer]                  # peer_node_id -> Peer
     circle_members: Dict[str, Set[str]]     # circle_id -> set(peer_node_id)
     messages: Dict[str, ChatMessage]        # msg_id -> ChatMessage
+    channels: Dict[str, Dict[str, Channel]]  # circle_id -> channel_id -> Channel
+    channel_members: Dict[str, Dict[str, Set[str]]]  # circle_id -> channel_id -> member node_ids
+    channel_requests: Dict[str, Dict[str, Set[str]]]  # circle_id -> channel_id -> pending node_ids
 
     @staticmethod
     def default(bind: str, port: int) -> State:
@@ -60,4 +74,7 @@ class State:
             peers={},
             circle_members={},
             messages={},
+            channels={},
+            channel_members={},
+            channel_requests={},
         )

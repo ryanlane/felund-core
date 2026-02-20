@@ -7,10 +7,16 @@ import sys
 import time
 from typing import List, Optional, Set
 
+from felundchat.channel_sync import (
+    CONTROL_CHANNEL_ID,
+    apply_channel_event,
+    make_channel_event_message,
+    parse_channel_event,
+)
 from felundchat.crypto import make_message_mac, sha256_hex
 from felundchat.gossip import GossipNode
 from felundchat.invite import make_felund_code, parse_felund_code
-from felundchat.models import ChatMessage, Circle, State, now_ts
+from felundchat.models import Channel, ChatMessage, Circle, State, now_ts
 from felundchat.persistence import load_state, save_state
 from felundchat.rendezvous_client import (
     is_network_error,
@@ -23,6 +29,57 @@ from felundchat.rendezvous_client import (
 from felundchat.transport import detect_local_ip, parse_hostport, public_addr_hint
 
 
+HELP_SUMMARY = {
+    "help": "Show all commands or details for one command",
+    "circles": "List circles",
+    "switch": "Switch active circle",
+    "channels": "List channels in active circle",
+    "channel": "Manage channels (create/join/leave/switch/requests/approve)",
+    "who": "Show members in a channel",
+    "inbox": "Show recent messages in active channel",
+    "debug": "Toggle local sync debug logs",
+    "quit": "Exit chat",
+}
+
+
+HELP_DETAILS = {
+    "help": [
+        "/help",
+        "/help <command>",
+    ],
+    "circles": [
+        "/circles",
+    ],
+    "switch": [
+        "/switch",
+    ],
+    "channels": [
+        "/channels",
+    ],
+    "channel": [
+        "/channel create <name> [public|key|invite] [key]",
+        "/channel join <name> [key]",
+        "/channel leave <name>",
+        "/channel switch <name>",
+        "/channel requests <name>",
+        "/channel approve <name> <node_id>",
+    ],
+    "who": [
+        "/who",
+        "/who <channel>",
+    ],
+    "inbox": [
+        "/inbox",
+    ],
+    "debug": [
+        "/debug",
+    ],
+    "quit": [
+        "/quit",
+    ],
+}
+
+
 def create_circle(state: State) -> Circle:
     secret = secrets.token_bytes(32)
     secret_hex = secret.hex()
@@ -30,13 +87,88 @@ def create_circle(state: State) -> Circle:
     circle = Circle(circle_id=circle_id, secret_hex=secret_hex)
     state.circles[circle_id] = circle
     state.circle_members.setdefault(circle_id, set()).add(state.node.node_id)
+    ensure_default_channel(state, circle_id)
     return circle
+
+
+def normalize_channel_id(raw: str) -> Optional[str]:
+    channel = raw.strip().lower()
+    if channel.startswith("#"):
+        channel = channel[1:]
+    if not channel or len(channel) > 32:
+        return None
+    if channel.startswith("__"):
+        return None
+    if not all(c.isalnum() or c in {"-", "_"} for c in channel):
+        return None
+    return channel
+
+
+def ensure_default_channel(state: State, circle_id: str) -> None:
+    state.channels.setdefault(circle_id, {})
+    state.channel_members.setdefault(circle_id, {})
+    state.channel_requests.setdefault(circle_id, {})
+
+    channels = state.channels[circle_id]
+    if "general" not in channels:
+        channels["general"] = Channel(
+            channel_id="general",
+            circle_id=circle_id,
+            created_by=state.node.node_id,
+            created_ts=now_ts(),
+            access_mode="public",
+        )
+
+    members = state.channel_members[circle_id].setdefault("general", set())
+    members.add(state.node.node_id)
+    state.channel_requests[circle_id].setdefault("general", set())
+
+
+def get_channel_ids(state: State, circle_id: str) -> List[str]:
+    channels = set(state.channels.get(circle_id, {}).keys())
+    for message in state.messages.values():
+        if message.circle_id == circle_id and message.channel_id and not message.channel_id.startswith("__"):
+            channels.add(message.channel_id)
+    if not channels:
+        channels.add("general")
+    return sorted(channels)
+
+
+def can_send_in_channel(state: State, circle_id: str, channel_id: str) -> bool:
+    members = state.channel_members.get(circle_id, {}).get(channel_id)
+    if not members:
+        return True
+    return state.node.node_id in members
+
+
+def print_help(topic: Optional[str] = None) -> None:
+    if not topic:
+        print("Available commands:")
+        for name in sorted(HELP_SUMMARY.keys()):
+            print(f" /{name:<8} {HELP_SUMMARY[name]}")
+        print("Use /help <command> for details.")
+        return
+
+    key = topic.strip().lower().lstrip("/")
+    if key not in HELP_DETAILS:
+        print(f"Unknown command '{topic}'.")
+        return
+
+    print(f"/{key} - {HELP_SUMMARY[key]}")
+    for line in HELP_DETAILS[key]:
+        print(f"  {line}")
+
+
+def append_channel_event(state: State, circle_id: str, event: dict) -> None:
+    msg = make_channel_event_message(state, circle_id, event)
+    if msg:
+        state.messages[msg.msg_id] = msg
 
 
 def render_message(m: ChatMessage) -> str:
     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.created_ts))
     author = m.display_name or m.author_node_id[:8]
-    return f"[{ts}] {author}: {m.text}"
+    return f"[{ts}] #{m.channel_id} {author}: {m.text}"
 
 
 def choose_circle_id(state: State, preferred: Optional[str] = None) -> Optional[str]:
@@ -97,11 +229,13 @@ async def interactive_chat(
     if not circle_id:
         print("No circles available.")
         return
+    ensure_default_channel(state, circle_id)
+    current_channel = "general"
 
     seen: Set[str] = set()
 
     def prompt_text() -> str:
-        return f"[{circle_id[:8]}] > "
+        return f"[{circle_id[:8]} #{current_channel}] > "
 
     def redraw_prompt() -> None:
         print(prompt_text(), end="", flush=True)
@@ -109,12 +243,22 @@ async def interactive_chat(
     async def watch_incoming() -> None:
         while not node._stop_event.is_set():
             async with node._lock:
-                msgs = [m for m in state.messages.values() if m.circle_id == circle_id]
+                msgs = [
+                    m for m in state.messages.values()
+                    if m.circle_id == circle_id and m.channel_id == current_channel
+                ]
                 msgs.sort(key=lambda m: (m.created_ts, m.msg_id))
             for m in msgs:
                 if m.msg_id in seen:
                     continue
                 seen.add(m.msg_id)
+                if m.channel_id == CONTROL_CHANNEL_ID:
+                    event = parse_channel_event(m.text)
+                    if event:
+                        async with node._lock:
+                            apply_channel_event(state, circle_id, event)
+                            save_state(state)
+                    continue
                 sys.stdout.write("\r")
                 print(render_message(m))
                 redraw_prompt()
@@ -122,7 +266,7 @@ async def interactive_chat(
 
     watcher = asyncio.create_task(watch_incoming())
     print("Chat ready. Type messages and press Enter.")
-    print("Commands: /switch, /circles, /inbox, /debug, /quit")
+    print("Commands: /help, /switch, /circles, /channels, /channel ..., /who, /inbox, /debug, /quit")
 
     try:
         while True:
@@ -137,15 +281,322 @@ async def interactive_chat(
                 for cid in sorted(state.circles.keys()):
                     print(f" - {cid}")
                 continue
+            if text == "/channels":
+                ensure_default_channel(state, circle_id)
+                channel_ids = get_channel_ids(state, circle_id)
+                members_map = state.channel_members.get(circle_id, {})
+                channel_map = state.channels.get(circle_id, {})
+                for channel_id in channel_ids:
+                    meta = channel_map.get(channel_id)
+                    access_mode = meta.access_mode if meta else "public"
+                    is_member = state.node.node_id in members_map.get(channel_id, set()) if channel_id in members_map else True
+                    marker = "*" if channel_id == current_channel else " "
+                    member_mark = "member" if is_member else "no-access"
+                    print(f"{marker} #{channel_id} [{access_mode}] ({member_mark})")
+                continue
+            if text.startswith("/help"):
+                parts = text.split(maxsplit=1)
+                print_help(parts[1] if len(parts) > 1 else None)
+                continue
+            if text.startswith("/who"):
+                parts = text.split(maxsplit=1)
+                target_channel = current_channel
+                if len(parts) > 1:
+                    parsed = normalize_channel_id(parts[1])
+                    if not parsed:
+                        print("Invalid channel name.")
+                        continue
+                    target_channel = parsed
+
+                ensure_default_channel(state, circle_id)
+                channel_map = state.channels.get(circle_id, {})
+                members_map = state.channel_members.get(circle_id, {})
+                requests_map = state.channel_requests.get(circle_id, {})
+
+                channel_meta = channel_map.get(target_channel)
+                if not channel_meta and target_channel not in get_channel_ids(state, circle_id):
+                    print(f"Unknown channel #{target_channel}.")
+                    continue
+
+                members = sorted(members_map.get(target_channel, set()))
+                if not members:
+                    print(f"#{target_channel} members: none known")
+                else:
+                    print(f"#{target_channel} members ({len(members)}):")
+                    for node_id in members:
+                        peer = state.peers.get(node_id)
+                        if node_id == state.node.node_id:
+                            print(f" - {node_id} (you)")
+                        elif peer:
+                            print(f" - {node_id} @ {peer.addr}")
+                        else:
+                            print(f" - {node_id}")
+
+                if channel_meta and channel_meta.created_by == state.node.node_id:
+                    pending = sorted(requests_map.get(target_channel, set()))
+                    if pending:
+                        print(f"#{target_channel} pending requests ({len(pending)}):")
+                        for node_id in pending:
+                            print(f" - {node_id}")
+                continue
             if text == "/switch":
                 next_cid = choose_circle_id(state)
                 if next_cid:
                     circle_id = next_cid
+                    ensure_default_channel(state, circle_id)
+                    current_channel = "general"
                     seen = set()
+                continue
+            if text.startswith("/channel"):
+                parts = text.split()
+                if len(parts) < 2:
+                    print_help("channel")
+                    continue
+                sub = parts[1].lower()
+                ensure_default_channel(state, circle_id)
+                channels = state.channels.setdefault(circle_id, {})
+                members_map = state.channel_members.setdefault(circle_id, {})
+                requests_map = state.channel_requests.setdefault(circle_id, {})
+
+                if sub == "create":
+                    if len(parts) < 3:
+                        print("Usage: /channel create <name> [public|key|invite] [key]")
+                        continue
+                    channel_id = normalize_channel_id(parts[2])
+                    if not channel_id:
+                        print("Invalid channel name. Use letters, numbers, -, _. Max 32 chars.")
+                        continue
+                    if channel_id in channels:
+                        print(f"Channel #{channel_id} already exists.")
+                        continue
+                    access_mode = "public"
+                    key_hash = ""
+                    if len(parts) >= 4:
+                        access_mode = parts[3].lower()
+                    if access_mode not in {"public", "key", "invite"}:
+                        print("Access mode must be one of: public, key, invite")
+                        continue
+                    if access_mode == "key":
+                        if len(parts) < 5:
+                            print("Usage: /channel create <name> key <channel_key>")
+                            continue
+                        key_material = f"{circle_id}|{channel_id}|{parts[4]}".encode("utf-8")
+                        key_hash = sha256_hex(key_material)
+
+                    channels[channel_id] = Channel(
+                        channel_id=channel_id,
+                        circle_id=circle_id,
+                        created_by=state.node.node_id,
+                        created_ts=now_ts(),
+                        access_mode=access_mode,
+                        key_hash=key_hash,
+                    )
+                    members_map.setdefault(channel_id, set()).add(state.node.node_id)
+                    requests_map.setdefault(channel_id, set())
+                    event = {
+                        "t": "CHANNEL_EVT",
+                        "op": "create",
+                        "circle_id": circle_id,
+                        "channel_id": channel_id,
+                        "access_mode": access_mode,
+                        "key_hash": key_hash,
+                        "actor_node_id": state.node.node_id,
+                        "created_by": state.node.node_id,
+                        "created_ts": now_ts(),
+                    }
+                    append_channel_event(state, circle_id, event)
+                    async with node._lock:
+                        save_state(state)
+                    print(f"Created #{channel_id} [{access_mode}].")
+                    continue
+
+                if sub in {"join", "switch", "leave", "requests", "approve"} and len(parts) < 3:
+                    print("Usage: /channel <join|switch|leave|requests> <name>")
+                    continue
+
+                channel_id = normalize_channel_id(parts[2]) if len(parts) >= 3 else None
+                if not channel_id:
+                    print("Invalid channel name.")
+                    continue
+
+                if sub == "join":
+                    channel = channels.get(channel_id)
+                    if not channel:
+                        print(f"Unknown channel #{channel_id}.")
+                        continue
+                    members = members_map.setdefault(channel_id, set())
+                    requests = requests_map.setdefault(channel_id, set())
+                    if state.node.node_id in members:
+                        print(f"Already in #{channel_id}.")
+                        continue
+                    if channel.access_mode == "public":
+                        members.add(state.node.node_id)
+                        append_channel_event(
+                            state,
+                            circle_id,
+                            {
+                                "t": "CHANNEL_EVT",
+                                "op": "join",
+                                "circle_id": circle_id,
+                                "channel_id": channel_id,
+                                "node_id": state.node.node_id,
+                                "actor_node_id": state.node.node_id,
+                                "created_ts": now_ts(),
+                            },
+                        )
+                        async with node._lock:
+                            save_state(state)
+                        print(f"Joined #{channel_id}.")
+                        continue
+                    if channel.access_mode == "key":
+                        if len(parts) < 4:
+                            print("Usage: /channel join <name> <channel_key>")
+                            continue
+                        key_material = f"{circle_id}|{channel_id}|{parts[3]}".encode("utf-8")
+                        if sha256_hex(key_material) != channel.key_hash:
+                            print("Invalid channel key.")
+                            continue
+                        members.add(state.node.node_id)
+                        append_channel_event(
+                            state,
+                            circle_id,
+                            {
+                                "t": "CHANNEL_EVT",
+                                "op": "join",
+                                "circle_id": circle_id,
+                                "channel_id": channel_id,
+                                "node_id": state.node.node_id,
+                                "actor_node_id": state.node.node_id,
+                                "created_ts": now_ts(),
+                            },
+                        )
+                        async with node._lock:
+                            save_state(state)
+                        print(f"Joined #{channel_id}.")
+                        continue
+
+                    # invite mode
+                    requests.add(state.node.node_id)
+                    append_channel_event(
+                        state,
+                        circle_id,
+                        {
+                            "t": "CHANNEL_EVT",
+                            "op": "request",
+                            "circle_id": circle_id,
+                            "channel_id": channel_id,
+                            "node_id": state.node.node_id,
+                            "actor_node_id": state.node.node_id,
+                            "created_ts": now_ts(),
+                        },
+                    )
+                    async with node._lock:
+                        save_state(state)
+                    print(f"Access requested for #{channel_id}. Owner must approve.")
+                    continue
+
+                if sub == "switch":
+                    members = members_map.get(channel_id, set())
+                    if members and state.node.node_id not in members:
+                        print(f"You are not a member of #{channel_id}.")
+                        continue
+                    if channel_id not in channels and channel_id not in get_channel_ids(state, circle_id):
+                        print(f"Unknown channel #{channel_id}.")
+                        continue
+                    current_channel = channel_id
+                    seen = set()
+                    continue
+
+                if sub == "leave":
+                    if channel_id == "general":
+                        print("Cannot leave #general.")
+                        continue
+                    members = members_map.get(channel_id, set())
+                    if state.node.node_id in members:
+                        members.remove(state.node.node_id)
+                        append_channel_event(
+                            state,
+                            circle_id,
+                            {
+                                "t": "CHANNEL_EVT",
+                                "op": "leave",
+                                "circle_id": circle_id,
+                                "channel_id": channel_id,
+                                "node_id": state.node.node_id,
+                                "actor_node_id": state.node.node_id,
+                                "created_ts": now_ts(),
+                            },
+                        )
+                        async with node._lock:
+                            save_state(state)
+                    if current_channel == channel_id:
+                        current_channel = "general"
+                        seen = set()
+                    print(f"Left #{channel_id}.")
+                    continue
+
+                if sub == "requests":
+                    channel = channels.get(channel_id)
+                    if not channel:
+                        print(f"Unknown channel #{channel_id}.")
+                        continue
+                    if channel.created_by != state.node.node_id:
+                        print("Only channel owner can view requests.")
+                        continue
+                    requests = sorted(requests_map.get(channel_id, set()))
+                    if not requests:
+                        print("No pending requests.")
+                        continue
+                    print(f"Pending requests for #{channel_id}:")
+                    for node_id in requests:
+                        print(f" - {node_id}")
+                    continue
+
+                if sub == "approve":
+                    if len(parts) < 4:
+                        print("Usage: /channel approve <name> <node_id>")
+                        continue
+                    target_node_id = parts[3]
+                    channel = channels.get(channel_id)
+                    if not channel:
+                        print(f"Unknown channel #{channel_id}.")
+                        continue
+                    if channel.created_by != state.node.node_id:
+                        print("Only channel owner can approve.")
+                        continue
+                    requests = requests_map.setdefault(channel_id, set())
+                    members = members_map.setdefault(channel_id, set())
+                    if target_node_id not in requests:
+                        print("No such pending request.")
+                        continue
+                    requests.remove(target_node_id)
+                    members.add(target_node_id)
+                    append_channel_event(
+                        state,
+                        circle_id,
+                        {
+                            "t": "CHANNEL_EVT",
+                            "op": "approve",
+                            "circle_id": circle_id,
+                            "channel_id": channel_id,
+                            "target_node_id": target_node_id,
+                            "actor_node_id": state.node.node_id,
+                            "created_ts": now_ts(),
+                        },
+                    )
+                    async with node._lock:
+                        save_state(state)
+                    print(f"Approved {target_node_id} for #{channel_id}.")
+                    continue
+
+                print_help("channel")
                 continue
             if text == "/inbox":
                 async with node._lock:
-                    msgs = [m for m in state.messages.values() if m.circle_id == circle_id]
+                    msgs = [
+                        m for m in state.messages.values()
+                        if m.circle_id == circle_id and m.channel_id == current_channel
+                    ]
                     msgs.sort(key=lambda m: (m.created_ts, m.msg_id))
                 for m in msgs[-20:]:
                     print(render_message(m))
@@ -163,11 +614,15 @@ async def interactive_chat(
             msg = ChatMessage(
                 msg_id=msg_id,
                 circle_id=circle_id,
+                channel_id=current_channel,
                 author_node_id=state.node.node_id,
                 display_name=state.node.display_name,
                 created_ts=created,
                 text=text,
             )
+            if not can_send_in_channel(state, circle_id, current_channel):
+                print(f"You do not have access to #{current_channel}.")
+                continue
             circle = state.circles.get(circle_id)
             if not circle:
                 print("Selected circle no longer exists.")
@@ -252,7 +707,12 @@ async def run_interactive_flow() -> None:
         state.circles[circle_id] = Circle(circle_id=circle_id, secret_hex=secret_hex)
         state.circle_members.setdefault(circle_id, set()).add(state.node.node_id)
         selected_circle_id = circle_id
+        ensure_default_channel(state, circle_id)
         save_state(state)
+
+    for cid in list(state.circles.keys()):
+        ensure_default_channel(state, cid)
+    save_state(state)
 
     node = GossipNode(state)
     await node.start_server()

@@ -11,6 +11,7 @@ from felundchat.config import (
 )
 from felundchat.models import (
     ChatMessage,
+    Channel,
     Circle,
     NodeConfig,
     Peer,
@@ -55,8 +56,22 @@ def load_state() -> State:
     circles = {cid: Circle(**c) for cid, c in data.get("circles", {}).items()}
     peers = {pid: Peer(**p) for pid, p in data.get("peers", {}).items()}
     circle_members = {cid: set(v) for cid, v in data.get("circle_members", {}).items()}
+    channels = {
+        cid: {channel_id: Channel(**channel_data) for channel_id, channel_data in circle_channels.items()}
+        for cid, circle_channels in data.get("channels", {}).items()
+    }
+    channel_members = {
+        cid: {channel_id: set(members) for channel_id, members in circle_map.items()}
+        for cid, circle_map in data.get("channel_members", {}).items()
+    }
+    channel_requests = {
+        cid: {channel_id: set(requests) for channel_id, requests in circle_map.items()}
+        for cid, circle_map in data.get("channel_requests", {}).items()
+    }
     messages = {}
     for mid, m in data.get("messages", {}).items():
+        if "channel_id" not in m:
+            m["channel_id"] = "general"
         messages[mid] = ChatMessage(**m)
 
     state = State(
@@ -65,6 +80,9 @@ def load_state() -> State:
         peers=peers,
         circle_members=circle_members,
         messages=messages,
+        channels=channels,
+        channel_members=channel_members,
+        channel_requests=channel_requests,
     )
     if not state.node.bind or state.node.bind == "0.0.0.0":
         state.node.bind = detect_local_ip()
@@ -83,6 +101,18 @@ def save_state(state: State) -> None:
         "peers": {pid: dataclasses.asdict(p) for pid, p in state.peers.items()},
         "circle_members": {cid: sorted(list(v)) for cid, v in state.circle_members.items()},
         "messages": {mid: dataclasses.asdict(m) for mid, m in state.messages.items()},
+        "channels": {
+            cid: {channel_id: dataclasses.asdict(channel) for channel_id, channel in circle_channels.items()}
+            for cid, circle_channels in state.channels.items()
+        },
+        "channel_members": {
+            cid: {channel_id: sorted(list(members)) for channel_id, members in circle_map.items()}
+            for cid, circle_map in state.channel_members.items()
+        },
+        "channel_requests": {
+            cid: {channel_id: sorted(list(requests)) for channel_id, requests in circle_map.items()}
+            for cid, circle_map in state.channel_requests.items()
+        },
     }
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")

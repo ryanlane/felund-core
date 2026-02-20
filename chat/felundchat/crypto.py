@@ -29,7 +29,7 @@ def verify_token(secret_hex: str, node_id: str, circle_id: str, nonce: str, toke
 def make_message_mac(secret_hex: str, msg: ChatMessage) -> str:
     secret = bytes.fromhex(secret_hex)
     payload = (
-        f"{msg.msg_id}|{msg.circle_id}|{msg.author_node_id}|"
+        f"{msg.msg_id}|{msg.circle_id}|{msg.channel_id}|{msg.author_node_id}|"
         f"{msg.display_name}|{msg.created_ts}|{msg.text}"
     ).encode("utf-8")
     return hmac_hex(secret, payload)
