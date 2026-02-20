@@ -59,6 +59,52 @@ def parse_channel_event(text: str) -> Optional[Dict[str, Any]]:
     return data
 
 
+# ---------------------------------------------------------------------------
+# Circle name events
+# ---------------------------------------------------------------------------
+
+def make_circle_name_message(state: State, circle_id: str, name: str) -> Optional[ChatMessage]:
+    """Create a control-channel message that announces a circle's friendly name."""
+    event = {
+        "t": "CIRCLE_NAME_EVT",
+        "circle_id": circle_id,
+        "name": name.strip(),
+        "actor_node_id": state.node.node_id,
+    }
+    return make_channel_event_message(state, circle_id, event)
+
+
+def parse_circle_name_event(text: str) -> Optional[Dict[str, Any]]:
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("t") != "CIRCLE_NAME_EVT":
+        return None
+    if not data.get("name"):
+        return None
+    return data
+
+
+def apply_circle_name_event(state: State, circle_id: str, event: Dict[str, Any]) -> bool:
+    """Apply a CIRCLE_NAME_EVT to local state.
+
+    Accepts the gossiped name only when the local circle has no name yet,
+    so each peer's deliberate local rename is never overwritten by gossip.
+    Returns True when the name was changed.
+    """
+    name = str(event.get("name", "")).strip()
+    if not name:
+        return False
+    circle = state.circles.get(circle_id)
+    if circle and not circle.name:
+        circle.name = name
+        return True
+    return False
+
+
 def _ensure_channel_maps(state: State, circle_id: str) -> None:
     state.channels.setdefault(circle_id, {})
     state.channel_members.setdefault(circle_id, {})

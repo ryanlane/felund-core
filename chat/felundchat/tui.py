@@ -27,8 +27,11 @@ from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Tree
 from felundchat.channel_sync import (
     CONTROL_CHANNEL_ID,
     apply_channel_event,
+    apply_circle_name_event,
     make_channel_event_message,
+    make_circle_name_message,
     parse_channel_event,
+    parse_circle_name_event,
 )
 from felundchat.chat import create_circle, ensure_default_channel
 from felundchat.crypto import make_message_mac, sha256_hex
@@ -529,6 +532,13 @@ class ChatScreen(Screen):
             if event:
                 apply_channel_event(self.state, self._current_circle_id, event)
                 save_state(self.state)
+                continue
+            name_event = parse_circle_name_event(m.text)
+            if name_event:
+                changed = apply_circle_name_event(self.state, self._current_circle_id, name_event)
+                if changed:
+                    save_state(self.state)
+                    self._refresh_sidebar()
 
     def _fmt(self, m: ChatMessage) -> str:
         ts = time.strftime("%H:%M", time.localtime(m.created_ts))
@@ -631,7 +641,8 @@ class ChatScreen(Screen):
             self._log_raw(f"  [{C}]/invite[/{C}]                         Show invite code for active circle")
             self._log_raw(f"  [{C}]/join[/{C}] [{A}]<code>[/{A}]                    Join a circle from an invite code")
             self._log_raw(f"  [{C}]/circles[/{C}]                        List all circles")
-            self._log_raw(f"  [{C}]/circle name[/{C}] [{A}]<label>[/{A}]            Rename the active circle (local)")
+            self._log_raw(f"  [{C}]/circle create[/{C}] [{A}][name][/{A}]           Create a new circle (shows invite code)")
+            self._log_raw(f"  [{C}]/circle name[/{C}] [{A}]<label>[/{A}]            Rename the active circle (gossiped to peers)")
             self._log_raw(f"  [{C}]/circle leave[/{C}]                   Leave and delete the active circle")
             self._log_raw(f"  [{C}]/channels[/{C}]                       List channels in active circle")
             self._log_raw(f"  [{C}]/channel create[/{C}] [{A}]<name> [mode][/{A}]  Create a channel (public/key/invite)")
@@ -725,13 +736,42 @@ class ChatScreen(Screen):
         else:
             self._log_system(f"Unknown command '{cmd}'. Type /help.")
 
+    def _gossip_circle_name(self, circle_id: str, name: str) -> None:
+        """Queue a CIRCLE_NAME_EVT message so peers receive the friendly name."""
+        msg = make_circle_name_message(self.state, circle_id, name)
+        if msg:
+            self.state.messages[msg.msg_id] = msg
+            self._seen.add(msg.msg_id)
+
     async def _circle_mgmt_cmd(self, args: list) -> None:
         if not args:
-            self._log_system("Usage: /circle name <label>  |  /circle leave")
+            self._log_system("Usage: /circle create [name]  |  /circle name <label>  |  /circle leave")
             return
         sub = args[0].lower()
 
-        if sub == "name":
+        if sub == "create":
+            name = " ".join(args[1:]).strip() if len(args) > 1 else ""
+            circle = create_circle(self.state)
+            if name:
+                circle.name = name
+            async with self.node._lock:
+                save_state(self.state)
+            if name:
+                self._gossip_circle_name(circle.circle_id, name)
+            # Switch to the new circle
+            self._current_circle_id = circle.circle_id
+            self._current_channel = "general"
+            self._seen = set()
+            self.query_one("#message-log", RichLog).clear()
+            self._refresh_sidebar()
+            # Show invite modal immediately
+            addr = public_addr_hint(self.state.node.bind, self.state.node.port)
+            code = make_felund_code(circle.secret_hex, addr)
+            label = f'"{name}"' if name else circle.circle_id[:8]
+            self._log_system(f"Circle {label} created.")
+            await self.app.push_screen(InviteModal(code))
+
+        elif sub == "name":
             if len(args) < 2:
                 self._log_system("Usage: /circle name <friendly label>")
                 return
@@ -743,8 +783,9 @@ class ChatScreen(Screen):
             if circle:
                 circle.name = new_name
                 save_state(self.state)
+                self._gossip_circle_name(self._current_circle_id, new_name)
                 self._refresh_sidebar()
-                self._log_system(f"Circle renamed to '{new_name}'.")
+                self._log_system(f"Circle renamed to '{new_name}'. Name will gossip to peers.")
 
         elif sub == "leave":
             cid = self._current_circle_id
@@ -778,7 +819,7 @@ class ChatScreen(Screen):
                 await self.app.push_screen(SetupScreen())
 
         else:
-            self._log_system("Usage: /circle name <label>  |  /circle leave")
+            self._log_system("Usage: /circle create [name]  |  /circle name <label>  |  /circle leave")
 
     async def _channel_cmd(self, args: list) -> None:
         if not args or not self._current_circle_id:
