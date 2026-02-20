@@ -220,13 +220,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--circle-id", help="Circle id")
     sp.set_defaults(func=cmd_peers)
 
+    sp = sub.add_parser("tui", help="Launch the Textual panel-based TUI (default)")
+    sp.set_defaults(func=cmd_tui)
+
     return p
+
+
+def cmd_tui(args: argparse.Namespace) -> None:
+    from felundchat.tui import FelundApp
+    FelundApp().run()
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    if not getattr(args, "cmd", None) or args.cmd == "interactive":
-        asyncio.run(run_interactive_flow())
+    if not getattr(args, "cmd", None) or args.cmd in {"interactive", "tui"}:
+        from felundchat.tui import FelundApp
+        FelundApp().run()
         return
     args.func(args)

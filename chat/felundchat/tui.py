@@ -1,0 +1,686 @@
+#!/usr/bin/env python3
+"""felundchat Textual TUI — panel-based terminal chat UI.
+
+Install dependency:  pip install textual
+Launch:              python felundchat.py tui
+                     python -m felundchat tui
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import secrets
+import time
+from typing import List, Optional, Set
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.screen import Screen
+from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Tree
+
+from felundchat.channel_sync import (
+    CONTROL_CHANNEL_ID,
+    apply_channel_event,
+    make_channel_event_message,
+    parse_channel_event,
+)
+from felundchat.chat import create_circle, ensure_default_channel
+from felundchat.crypto import make_message_mac, sha256_hex
+from felundchat.gossip import GossipNode
+from felundchat.invite import make_felund_code, parse_felund_code
+from felundchat.models import Channel, ChatMessage, Circle, State, now_ts
+from felundchat.persistence import load_state, save_state
+from felundchat.rendezvous_client import (
+    is_network_error,
+    lookup_peer_addrs,
+    merge_discovered_peers,
+    register_presence,
+    safe_api_base_from_env,
+    unregister_presence,
+)
+from felundchat.transport import detect_local_ip, public_addr_hint
+
+
+# ---------------------------------------------------------------------------
+# Setup screen
+# ---------------------------------------------------------------------------
+
+class SetupScreen(Screen):
+    """First-run wizard: host a new circle or join an existing one."""
+
+    DEFAULT_CSS = """
+    SetupScreen {
+        align: center middle;
+    }
+    #setup-box {
+        width: 64;
+        height: auto;
+        border: solid $primary;
+        padding: 1 2;
+    }
+    #setup-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    .mode-row {
+        height: auto;
+        margin-bottom: 1;
+    }
+    .mode-btn {
+        width: 1fr;
+    }
+    .field-label {
+        margin-top: 1;
+        color: $text-muted;
+    }
+    .hidden {
+        display: none;
+    }
+    #error-msg {
+        color: $error;
+        height: 1;
+        margin-top: 1;
+    }
+    #btn-start {
+        margin-top: 1;
+        width: 100%;
+    }
+    """
+
+    _mode: str = "host"
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="setup-box"):
+            yield Label("Welcome to felundchat", id="setup-title")
+            yield Label("How would you like to start?")
+            with Horizontal(classes="mode-row"):
+                yield Button("Host new circle", id="btn-host", classes="mode-btn", variant="primary")
+                yield Button("Join with invite code", id="btn-join", classes="mode-btn")
+            yield Label("Display name:", classes="field-label")
+            yield Input(placeholder="anon", id="input-name")
+            yield Label("Listen port:", classes="field-label")
+            yield Input(value="9999", id="input-port")
+            yield Label("Invite code:", id="label-code", classes="field-label hidden")
+            yield Input(placeholder="felund1....", id="input-code", classes="hidden")
+            yield Label("", id="error-msg")
+            yield Button("Start", id="btn-start", variant="success")
+        yield Footer()
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id
+        if bid == "btn-host":
+            self._mode = "host"
+            self.query_one("#btn-host").variant = "primary"
+            self.query_one("#btn-join").variant = "default"
+            self.query_one("#input-code").add_class("hidden")
+            self.query_one("#label-code").add_class("hidden")
+        elif bid == "btn-join":
+            self._mode = "join"
+            self.query_one("#btn-join").variant = "primary"
+            self.query_one("#btn-host").variant = "default"
+            self.query_one("#input-code").remove_class("hidden")
+            self.query_one("#label-code").remove_class("hidden")
+        elif bid == "btn-start":
+            await self._do_start()
+
+    def _show_error(self, msg: str) -> None:
+        self.query_one("#error-msg", Label).update(msg)
+
+    async def _do_start(self) -> None:
+        state = load_state()
+
+        name = self.query_one("#input-name", Input).value.strip() or "anon"
+        state.node.display_name = name
+
+        port_raw = self.query_one("#input-port", Input).value.strip()
+        try:
+            port = int(port_raw)
+            if not (1 <= port <= 65535):
+                raise ValueError("out of range")
+        except ValueError:
+            self._show_error("Invalid port number (1-65535).")
+            return
+        state.node.port = port
+        state.node.bind = detect_local_ip()
+
+        initial_msg: Optional[str] = None
+        bootstrap_peer: Optional[str] = None
+        bootstrap_circle: Optional[str] = None
+
+        if self._mode == "host":
+            circle = create_circle(state)
+            save_state(state)
+            addr = public_addr_hint(state.node.bind, state.node.port)
+            code = make_felund_code(circle.secret_hex, addr)
+            initial_msg = f"Circle ready! Share this invite code with friends:\n{code}"
+        else:
+            code_val = self.query_one("#input-code", Input).value.strip()
+            try:
+                secret_hex, peer_addr = parse_felund_code(code_val)
+            except Exception as e:
+                self._show_error(f"Invalid invite code: {e}")
+                return
+            secret = bytes.fromhex(secret_hex)
+            circle_id = sha256_hex(secret)[:24]
+            state.circles[circle_id] = Circle(circle_id=circle_id, secret_hex=secret_hex)
+            state.circle_members.setdefault(circle_id, set()).add(state.node.node_id)
+            ensure_default_channel(state, circle_id)
+            save_state(state)
+            bootstrap_peer = peer_addr
+            bootstrap_circle = circle_id
+
+        await self.app.push_screen(
+            ChatScreen(
+                state,
+                initial_msg=initial_msg,
+                bootstrap_peer=bootstrap_peer,
+                bootstrap_circle=bootstrap_circle,
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# Chat screen
+# ---------------------------------------------------------------------------
+
+class ChatScreen(Screen):
+    """Main panel-based chat interface."""
+
+    BINDINGS = [
+        Binding("ctrl+q", "app.quit", "Quit"),
+        Binding("ctrl+i", "show_invite", "Invite code"),
+        Binding("escape", "focus_input", "Focus input"),
+    ]
+
+    DEFAULT_CSS = """
+    ChatScreen {
+        layout: vertical;
+    }
+    #chat-body {
+        height: 1fr;
+    }
+    #circle-tree {
+        width: 22;
+        border-right: solid $primary-darken-2;
+        padding: 0 1;
+    }
+    #message-log {
+        width: 1fr;
+        padding: 0 1;
+    }
+    #message-input {
+        dock: bottom;
+        height: 3;
+        border-top: solid $primary-darken-2;
+    }
+    """
+
+    def __init__(
+        self,
+        state: State,
+        initial_msg: Optional[str] = None,
+        bootstrap_peer: Optional[str] = None,
+        bootstrap_circle: Optional[str] = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.state = state
+        self._initial_msg = initial_msg
+        self._bootstrap_peer = bootstrap_peer
+        self._bootstrap_circle = bootstrap_circle
+        self.node: Optional[GossipNode] = None
+        self._current_circle_id: Optional[str] = None
+        self._current_channel: str = "general"
+        self._seen: Set[str] = set()
+        self._gossip_task: Optional[asyncio.Task] = None
+        self._rendezvous_task: Optional[asyncio.Task] = None
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with Horizontal(id="chat-body"):
+            yield Tree("Circles", id="circle-tree")
+            yield RichLog(id="message-log", markup=True, auto_scroll=True, highlight=False)
+        yield Input(placeholder="Type a message... (/help for commands)", id="message-input")
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        for cid in self.state.circles:
+            ensure_default_channel(self.state, cid)
+
+        circles = sorted(self.state.circles.keys())
+        if circles:
+            self._current_circle_id = self._bootstrap_circle or circles[0]
+
+        if not self.state.node.bind or self.state.node.bind == "0.0.0.0":
+            self.state.node.bind = detect_local_ip()
+
+        self.node = GossipNode(self.state)
+        await self.node.start_server()
+        self._gossip_task = asyncio.create_task(self.node.gossip_loop())
+
+        api_base = safe_api_base_from_env()
+        if api_base:
+            self._rendezvous_task = asyncio.create_task(self._rendezvous_loop(api_base))
+            self._log_system(f"Rendezvous enabled: {api_base}")
+
+        if self._bootstrap_peer and self._bootstrap_circle:
+            asyncio.create_task(
+                self.node.connect_and_sync(self._bootstrap_peer, self._bootstrap_circle)
+            )
+
+        self._refresh_sidebar()
+        self._load_history()
+
+        if self._initial_msg:
+            self._log_system(self._initial_msg)
+
+        self.set_interval(1.0, self._poll_new_messages)
+        self.set_interval(10.0, self._refresh_sidebar)
+
+        self.query_one("#message-input", Input).focus()
+
+    async def on_unmount(self) -> None:
+        if self.node:
+            self.node.stop()
+
+        for task in (self._gossip_task, self._rendezvous_task):
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+        api_base = safe_api_base_from_env()
+        if api_base and self.node:
+            for cid in list(self.state.circles.keys()):
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(unregister_presence, api_base, self.state, cid)
+
+        if self.node:
+            await self.node.stop_server()
+
+    # ── Sidebar ──────────────────────────────────────────────────────────────
+
+    def _refresh_sidebar(self) -> None:
+        tree = self.query_one("#circle-tree", Tree)
+        tree.clear()
+        for cid in sorted(self.state.circles.keys()):
+            circle_node = tree.root.add(f"* {cid[:8]}", data={"type": "circle", "cid": cid})
+            ensure_default_channel(self.state, cid)
+            for ch_id in sorted(self.state.channels.get(cid, {}).keys()):
+                active = (cid == self._current_circle_id and ch_id == self._current_channel)
+                label = f"#{ch_id} <" if active else f"#{ch_id}"
+                circle_node.add_leaf(label, data={"type": "channel", "cid": cid, "channel": ch_id})
+            circle_node.expand()
+        self._update_title()
+
+    def _update_title(self) -> None:
+        peers = 0
+        if self._current_circle_id:
+            peers = max(0, len(self.state.circle_members.get(self._current_circle_id, set())) - 1)
+        cid_short = self._current_circle_id[:8] if self._current_circle_id else "none"
+        peer_word = "peer" if peers == 1 else "peers"
+        self.title = f"felundchat  {cid_short} | #{self._current_channel} | {peers} {peer_word}"
+
+    # ── Message log ──────────────────────────────────────────────────────────
+
+    def _visible_msgs(self) -> List[ChatMessage]:
+        return sorted(
+            (
+                m for m in self.state.messages.values()
+                if m.circle_id == self._current_circle_id
+                and m.channel_id == self._current_channel
+            ),
+            key=lambda m: (m.created_ts, m.msg_id),
+        )
+
+    def _load_history(self) -> None:
+        if not self._current_circle_id:
+            return
+        log = self.query_one("#message-log", RichLog)
+        for m in self._visible_msgs()[-50:]:
+            self._seen.add(m.msg_id)
+            log.write(self._fmt(m))
+
+    def _poll_new_messages(self) -> None:
+        if not self._current_circle_id:
+            return
+        self._process_control_events()
+        log = self.query_one("#message-log", RichLog)
+        new_msgs = [m for m in self._visible_msgs() if m.msg_id not in self._seen]
+        for m in new_msgs:
+            self._seen.add(m.msg_id)
+            log.write(self._fmt(m))
+        if new_msgs:
+            self._update_title()
+
+    def _process_control_events(self) -> None:
+        if not self._current_circle_id:
+            return
+        for m in list(self.state.messages.values()):
+            if m.circle_id != self._current_circle_id:
+                continue
+            if m.channel_id != CONTROL_CHANNEL_ID:
+                continue
+            if m.msg_id in self._seen:
+                continue
+            self._seen.add(m.msg_id)
+            event = parse_channel_event(m.text)
+            if event:
+                apply_channel_event(self.state, self._current_circle_id, event)
+                save_state(self.state)
+
+    def _fmt(self, m: ChatMessage) -> str:
+        ts = time.strftime("%H:%M", time.localtime(m.created_ts))
+        author = m.display_name or m.author_node_id[:8]
+        is_me = m.author_node_id == self.state.node.node_id
+        if is_me:
+            return f"[dim]{ts}[/dim] [bold green]{author}[/bold green]: {m.text}"
+        return f"[dim]{ts}[/dim] [bold]{author}[/bold]: {m.text}"
+
+    def _log_system(self, msg: str) -> None:
+        self.query_one("#message-log", RichLog).write(f"[dim italic]  {msg}[/dim italic]")
+
+    # ── Rendezvous ───────────────────────────────────────────────────────────
+
+    async def _rendezvous_loop(self, api_base: str) -> None:
+        while not self.node._stop_event.is_set():
+            async with self.node._lock:
+                cids = list(self.state.circles.keys())
+            for cid in cids:
+                try:
+                    await asyncio.to_thread(register_presence, api_base, self.state, cid)
+                    discovered = await asyncio.to_thread(lookup_peer_addrs, api_base, self.state, cid)
+                    async with self.node._lock:
+                        changed = merge_discovered_peers(self.state, cid, discovered)
+                        if changed:
+                            save_state(self.state)
+                    for _, addr in discovered[:5]:
+                        await self.node.connect_and_sync(addr, cid)
+                except Exception as e:
+                    if self.node.debug_sync and not is_network_error(e):
+                        self._log_system(f"[api] {cid[:8]}: {type(e).__name__}: {e}")
+            try:
+                await asyncio.wait_for(self.node._stop_event.wait(), timeout=8)
+            except asyncio.TimeoutError:
+                pass
+
+    # ── Input handling ───────────────────────────────────────────────────────
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        text = event.value.strip()
+        self.query_one("#message-input", Input).value = ""
+        if not text:
+            return
+        if text.startswith("/"):
+            await self._handle_command(text)
+        else:
+            await self._send_message(text)
+
+    async def _send_message(self, text: str) -> None:
+        if not self._current_circle_id:
+            self._log_system("No active circle. Type /help to get started.")
+            return
+        circle = self.state.circles.get(self._current_circle_id)
+        if not circle:
+            return
+        created = now_ts()
+        msg_id = sha256_hex(
+            f"{self.state.node.node_id}|{created}|{secrets.token_hex(8)}".encode()
+        )[:32]
+        msg = ChatMessage(
+            msg_id=msg_id,
+            circle_id=self._current_circle_id,
+            channel_id=self._current_channel,
+            author_node_id=self.state.node.node_id,
+            display_name=self.state.node.display_name,
+            created_ts=created,
+            text=text,
+        )
+        msg.mac = make_message_mac(circle.secret_hex, msg)
+        async with self.node._lock:
+            self.state.messages[msg_id] = msg
+            save_state(self.state)
+        self._seen.add(msg_id)
+        self.query_one("#message-log", RichLog).write(self._fmt(msg))
+        asyncio.create_task(self._sync_once())
+
+    async def _sync_once(self) -> None:
+        if not self._current_circle_id or not self.node:
+            return
+        async with self.node._lock:
+            peers = [p.addr for p in self.node.known_peers_for_circle(self._current_circle_id)]
+        for addr in peers[:5]:
+            await self.node.connect_and_sync(addr, self._current_circle_id)
+
+    # ── Slash commands ───────────────────────────────────────────────────────
+
+    async def _handle_command(self, text: str) -> None:
+        parts = text.split()
+        cmd = parts[0].lower()
+
+        if cmd == "/help":
+            self._log_system(
+                "Commands: /invite  /join <code>  /circles  /channels  "
+                "/channel create|join|switch|leave <name>  /who [channel]  /debug  /quit"
+            )
+
+        elif cmd == "/quit":
+            await self.app.action_quit()
+
+        elif cmd == "/circles":
+            for cid in sorted(self.state.circles.keys()):
+                count = len(self.state.circle_members.get(cid, set()))
+                active = " <" if cid == self._current_circle_id else ""
+                self._log_system(f"  {cid[:8]} ({count} members){active}")
+
+        elif cmd == "/channels":
+            if not self._current_circle_id:
+                self._log_system("No active circle.")
+                return
+            ensure_default_channel(self.state, self._current_circle_id)
+            for ch in sorted(self.state.channels.get(self._current_circle_id, {}).keys()):
+                active = " <" if ch == self._current_channel else ""
+                self._log_system(f"  #{ch}{active}")
+
+        elif cmd == "/invite":
+            if not self._current_circle_id:
+                self._log_system("No active circle.")
+                return
+            circle = self.state.circles.get(self._current_circle_id)
+            if circle:
+                addr = public_addr_hint(self.state.node.bind, self.state.node.port)
+                code = make_felund_code(circle.secret_hex, addr)
+                self._log_system(f"Invite code: {code}")
+
+        elif cmd == "/join":
+            if len(parts) < 2:
+                self._log_system("Usage: /join <invite_code>")
+                return
+            try:
+                secret_hex, peer_addr = parse_felund_code(parts[1])
+            except Exception as e:
+                self._log_system(f"Invalid code: {e}")
+                return
+            secret = bytes.fromhex(secret_hex)
+            circle_id = sha256_hex(secret)[:24]
+            self.state.circles[circle_id] = Circle(circle_id=circle_id, secret_hex=secret_hex)
+            self.state.circle_members.setdefault(circle_id, set()).add(self.state.node.node_id)
+            ensure_default_channel(self.state, circle_id)
+            async with self.node._lock:
+                save_state(self.state)
+            self._current_circle_id = circle_id
+            self._current_channel = "general"
+            self._seen = set()
+            self.query_one("#message-log", RichLog).clear()
+            self._refresh_sidebar()
+            asyncio.create_task(self.node.connect_and_sync(peer_addr, circle_id))
+            self._log_system(f"Joined circle {circle_id[:8]}. Syncing...")
+            self._load_history()
+
+        elif cmd == "/who":
+            target = parts[1].lstrip("#") if len(parts) > 1 else self._current_channel
+            if not self._current_circle_id:
+                return
+            members = sorted(
+                self.state.channel_members.get(self._current_circle_id, {}).get(target, set())
+            )
+            self._log_system(f"#{target} — {len(members)} member(s):")
+            for nid in members:
+                p = self.state.peers.get(nid)
+                tag = "(you)" if nid == self.state.node.node_id else (f"@ {p.addr}" if p else "")
+                self._log_system(f"  {nid[:8]} {tag}")
+
+        elif cmd == "/debug":
+            if self.node:
+                self.node.debug_sync = not self.node.debug_sync
+                self._log_system(f"Sync debug: {'on' if self.node.debug_sync else 'off'}")
+
+        elif cmd == "/channel":
+            await self._channel_cmd(parts[1:])
+
+        else:
+            self._log_system(f"Unknown command '{cmd}'. Type /help.")
+
+    async def _channel_cmd(self, args: list) -> None:
+        if not args or not self._current_circle_id:
+            self._log_system("Usage: /channel create|join|switch|leave <name>")
+            return
+
+        ensure_default_channel(self.state, self._current_circle_id)
+        channels = self.state.channels[self._current_circle_id]
+        members_map = self.state.channel_members[self._current_circle_id]
+        requests_map = self.state.channel_requests.setdefault(self._current_circle_id, {})
+        sub = args[0].lower()
+
+        if sub == "create":
+            if len(args) < 2:
+                self._log_system("Usage: /channel create <name> [public|key|invite]")
+                return
+            ch_id = args[1].lower()
+            access_mode = args[2].lower() if len(args) > 2 else "public"
+            if access_mode not in {"public", "key", "invite"}:
+                self._log_system("Access mode must be: public, key, or invite")
+                return
+            if ch_id in channels:
+                self._log_system(f"#{ch_id} already exists.")
+                return
+            channels[ch_id] = Channel(
+                channel_id=ch_id,
+                circle_id=self._current_circle_id,
+                created_by=self.state.node.node_id,
+                created_ts=now_ts(),
+                access_mode=access_mode,
+            )
+            members_map.setdefault(ch_id, set()).add(self.state.node.node_id)
+            requests_map.setdefault(ch_id, set())
+            event = {
+                "t": "CHANNEL_EVT", "op": "create",
+                "circle_id": self._current_circle_id, "channel_id": ch_id,
+                "access_mode": access_mode, "key_hash": "",
+                "actor_node_id": self.state.node.node_id,
+                "created_by": self.state.node.node_id, "created_ts": now_ts(),
+            }
+            msg = make_channel_event_message(self.state, self._current_circle_id, event)
+            if msg:
+                self.state.messages[msg.msg_id] = msg
+                self._seen.add(msg.msg_id)
+            async with self.node._lock:
+                save_state(self.state)
+            self._refresh_sidebar()
+            self._log_system(f"Created #{ch_id} [{access_mode}].")
+
+        elif sub == "switch":
+            if len(args) < 2:
+                self._log_system("Usage: /channel switch <name>")
+                return
+            ch_id = args[1].lower()
+            if ch_id not in channels:
+                self._log_system(f"Unknown channel #{ch_id}.")
+                return
+            self._current_channel = ch_id
+            self._seen = set()
+            self.query_one("#message-log", RichLog).clear()
+            self._load_history()
+            self._refresh_sidebar()
+
+        elif sub == "join":
+            if len(args) < 2:
+                self._log_system("Usage: /channel join <name>")
+                return
+            ch_id = args[1].lower()
+            if ch_id not in channels:
+                self._log_system(f"Unknown channel #{ch_id}.")
+                return
+            members_map.setdefault(ch_id, set()).add(self.state.node.node_id)
+            async with self.node._lock:
+                save_state(self.state)
+            self._log_system(f"Joined #{ch_id}.")
+
+        elif sub == "leave":
+            if len(args) < 2:
+                self._log_system("Usage: /channel leave <name>")
+                return
+            ch_id = args[1].lower()
+            if ch_id == "general":
+                self._log_system("Cannot leave #general.")
+                return
+            members_map.get(ch_id, set()).discard(self.state.node.node_id)
+            async with self.node._lock:
+                save_state(self.state)
+            if self._current_channel == ch_id:
+                self._current_channel = "general"
+                self._seen = set()
+                self.query_one("#message-log", RichLog).clear()
+                self._load_history()
+            self._refresh_sidebar()
+            self._log_system(f"Left #{ch_id}.")
+
+        else:
+            self._log_system("Usage: /channel create|join|switch|leave <name>")
+
+    # ── Sidebar interaction ───────────────────────────────────────────────────
+
+    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+        data = event.node.data
+        if not data or data.get("type") != "channel":
+            return
+        cid = data["cid"]
+        ch_id = data["channel"]
+        if cid == self._current_circle_id and ch_id == self._current_channel:
+            self.query_one("#message-input", Input).focus()
+            return
+        self._current_circle_id = cid
+        self._current_channel = ch_id
+        self._seen = set()
+        self.query_one("#message-log", RichLog).clear()
+        self._load_history()
+        self._refresh_sidebar()
+        self.query_one("#message-input", Input).focus()
+
+    # ── Actions ───────────────────────────────────────────────────────────────
+
+    async def action_show_invite(self) -> None:
+        await self._handle_command("/invite")
+
+    def action_focus_input(self) -> None:
+        self.query_one("#message-input", Input).focus()
+
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
+class FelundApp(App):
+    """felundchat terminal UI application."""
+
+    TITLE = "felundchat"
+    BINDINGS = [Binding("ctrl+q", "quit", "Quit")]
+
+    def on_mount(self) -> None:
+        state = load_state()
+        if state.circles:
+            self.push_screen(ChatScreen(state))
+        else:
+            self.push_screen(SetupScreen())
