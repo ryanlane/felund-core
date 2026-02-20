@@ -114,7 +114,7 @@ async def interactive_chat(
 
     watcher = asyncio.create_task(watch_incoming())
     print("Chat ready. Type messages and press Enter.")
-    print("Commands: /switch, /circles, /inbox, /quit")
+    print("Commands: /switch, /circles, /inbox, /debug, /quit")
 
     try:
         while True:
@@ -141,6 +141,11 @@ async def interactive_chat(
                     msgs.sort(key=lambda m: (m.created_ts, m.msg_id))
                 for m in msgs[-20:]:
                     print(render_message(m))
+                continue
+            if text == "/debug":
+                node.debug_sync = not node.debug_sync
+                status = "on" if node.debug_sync else "off"
+                print(f"Sync debug is now {status}.")
                 continue
 
             created = now_ts()

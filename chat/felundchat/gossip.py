@@ -23,6 +23,11 @@ class GossipNode:
         self._lock = asyncio.Lock()
         self._server: Optional[asyncio.AbstractServer] = None
         self._stop_event = asyncio.Event()
+        self.debug_sync = False
+
+    def _sync_log(self, message: str) -> None:
+        if self.debug_sync:
+            print(message)
 
     def circles_list(self) -> List[str]:
         return sorted(self.state.circles.keys())
@@ -241,7 +246,9 @@ class GossipNode:
         try:
             reader, writer = await asyncio.open_connection(host, port)
         except Exception as e:
-            print(f"[sync] {peer_addr} {circle_id}: connect failed ({type(e).__name__}: {e})")
+            self._sync_log(
+                f"[sync] {peer_addr} {circle_id}: connect failed ({type(e).__name__}: {e})"
+            )
             return
 
         try:
@@ -255,7 +262,7 @@ class GossipNode:
 
             challenge = await read_frame(reader)
             if challenge.get("t") != "CHALLENGE":
-                print(f"[sync] {peer_addr} {circle_id}: expected CHALLENGE")
+                self._sync_log(f"[sync] {peer_addr} {circle_id}: expected CHALLENGE")
                 return
 
             nonce = str(challenge.get("nonce", ""))
@@ -267,13 +274,15 @@ class GossipNode:
 
             resp = await read_frame(reader)
             if resp.get("t") != "WELCOME":
-                print(f"[sync] {peer_addr} {circle_id}: rejected ({resp.get('err', 'unknown')})")
+                self._sync_log(
+                    f"[sync] {peer_addr} {circle_id}: rejected ({resp.get('err', 'unknown')})"
+                )
                 return
 
             await self._sync_with_connected_peer(reader, writer, circle_id)
 
         except Exception as e:
-            print(f"[sync] {peer_addr} {circle_id}: {type(e).__name__}: {e}")
+            self._sync_log(f"[sync] {peer_addr} {circle_id}: {type(e).__name__}: {e}")
         finally:
             try:
                 writer.close()
