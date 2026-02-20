@@ -71,3 +71,25 @@ curl -X DELETE http://127.0.0.1:8080/v1/register \
 - Data disappears on process restart.
 - Signature verification from the spec is not yet enforced in this scaffold.
 - Relay endpoints are not implemented yet in this scaffold.
+
+## Enable in chat client (feature flag)
+
+The interactive chat client can use this API for periodic register + peer discovery.
+
+Linux/macOS:
+
+```bash
+export FELUND_API_BASE=http://127.0.0.1:8080
+python chat/felundchat.py
+```
+
+Windows PowerShell:
+
+```powershell
+$env:FELUND_API_BASE = "http://127.0.0.1:8080"
+python chat/felundchat.py
+```
+
+When enabled, the client logs:
+
+- `[api] rendezvous enabled: ...`

@@ -12,6 +12,14 @@ from felundchat.gossip import GossipNode
 from felundchat.invite import make_felund_code, parse_felund_code
 from felundchat.models import ChatMessage, Circle, State, now_ts
 from felundchat.persistence import load_state, save_state
+from felundchat.rendezvous_client import (
+    is_network_error,
+    lookup_peer_addrs,
+    merge_discovered_peers,
+    register_presence,
+    safe_api_base_from_env,
+    unregister_presence,
+)
 from felundchat.transport import detect_local_ip, parse_hostport, public_addr_hint
 
 
@@ -250,6 +258,36 @@ async def run_interactive_flow() -> None:
     await node.start_server()
     gossip_task = asyncio.create_task(node.gossip_loop(interval_s=5))
 
+    api_base = safe_api_base_from_env()
+    rendezvous_task: Optional[asyncio.Task] = None
+    if api_base:
+        async def rendezvous_loop() -> None:
+            while not node._stop_event.is_set():
+                async with node._lock:
+                    circle_ids = list(state.circles.keys())
+
+                for circle_id in circle_ids:
+                    try:
+                        await asyncio.to_thread(register_presence, api_base, state, circle_id)
+                        discovered = await asyncio.to_thread(lookup_peer_addrs, api_base, state, circle_id)
+                        async with node._lock:
+                            changed = merge_discovered_peers(state, circle_id, discovered)
+                            if changed:
+                                save_state(state)
+                        for _, addr in discovered[:5]:
+                            await node.connect_and_sync(addr, circle_id)
+                    except Exception as e:
+                        if node.debug_sync and not is_network_error(e):
+                            print(f"[api] {circle_id}: {type(e).__name__}: {e}")
+
+                try:
+                    await asyncio.wait_for(node._stop_event.wait(), timeout=8)
+                except asyncio.TimeoutError:
+                    pass
+
+        rendezvous_task = asyncio.create_task(rendezvous_loop())
+        print(f"[api] rendezvous enabled: {api_base}")
+
     bootstrap_task: Optional[asyncio.Task] = None
     if mode == "client" and peer:
         async def periodic_bootstrap() -> None:
@@ -271,6 +309,13 @@ async def run_interactive_flow() -> None:
         gossip_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await gossip_task
+        if rendezvous_task:
+            rendezvous_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await rendezvous_task
+            for circle_id in list(state.circles.keys()):
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(unregister_presence, api_base, state, circle_id)
         if bootstrap_task:
             bootstrap_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

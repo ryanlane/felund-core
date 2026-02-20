@@ -56,6 +56,7 @@ You will be prompted for:
 - `/circles` list joined circles
 - `/switch` switch active circle
 - `/inbox` show recent messages
+- `/debug` toggle local sync debug logs on/off
 - `/quit` exit chat
 
 ## Manual/Legacy CLI Commands
@@ -114,3 +115,31 @@ python chat/felundchat.py peers --circle-id <circle_id>
 - The app auto-detects your local IP for peer sharing.
 - Keep at least one node online so gossip can propagate messages.
 - For cross-network use, ensure the chosen port is reachable.
+- Sync debug logs are local-only and off by default.
+
+## Optional API-Assisted Discovery (MVP)
+
+An optional rendezvous API scaffold is included for internet-style peer discovery.
+
+- API service: `api/rendezvous.py`
+- Enable in chat client by setting `FELUND_API_BASE`
+
+Linux/macOS:
+
+```bash
+export FELUND_API_BASE=http://127.0.0.1:8080
+python chat/felundchat.py
+```
+
+Windows PowerShell:
+
+```powershell
+$env:FELUND_API_BASE = "http://127.0.0.1:8080"
+python chat/felundchat.py
+```
+
+## Docs
+
+- [Implementation reference](docs/felundchat-reference.md)
+- [MVP API spec](docs/mvp-api-spec.md)
+- [MVP API quickstart](docs/mvp-api-quickstart.md)
