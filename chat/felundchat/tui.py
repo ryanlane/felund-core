@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import secrets
 import subprocess
 import sys
 import time
 from typing import List, Optional, Set
+
+from rich.markup import escape as markup_escape
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -69,6 +72,42 @@ def _try_copy_to_clipboard(text: str) -> bool:
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             continue
     return False
+
+
+# ---------------------------------------------------------------------------
+# Inline Markdown → Rich markup renderer
+# ---------------------------------------------------------------------------
+
+def _render_text(text: str) -> str:
+    """Escape Rich markup in *text*, then convert common inline Markdown to Rich markup.
+
+    Supported syntax:
+      **bold**   *italic*   `code`   ~~strikethrough~~
+    """
+    # Escape any Rich markup the user typed (prevents injection)
+    out = markup_escape(text)
+
+    # Code spans — processed first so their content isn't altered by later rules.
+    # markup_escape already escaped the content; we just add styling around it.
+    out = re.sub(
+        r"`([^`\n]+)`",
+        r"[bold bright_black on grey23] \1 [/bold bright_black on grey23]",
+        out,
+    )
+
+    # Bold  **text**
+    out = re.sub(r"\*\*(.+?)\*\*", r"[bold]\1[/bold]", out)
+
+    # Italic  *text*  (single asterisk; bold already consumed the doubles)
+    out = re.sub(r"\*([^*\n]+)\*", r"[italic]\1[/italic]", out)
+
+    # Italic  _text_  (only at non-word boundaries to avoid breaking snake_case)
+    out = re.sub(r"(?<!\w)_([^_\n]+)_(?!\w)", r"[italic]\1[/italic]", out)
+
+    # Strikethrough  ~~text~~
+    out = re.sub(r"~~(.+?)~~", r"[strike]\1[/strike]", out)
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -493,14 +532,19 @@ class ChatScreen(Screen):
 
     def _fmt(self, m: ChatMessage) -> str:
         ts = time.strftime("%H:%M", time.localtime(m.created_ts))
-        author = m.display_name or m.author_node_id[:8]
+        author = markup_escape(m.display_name or m.author_node_id[:8])
+        body = _render_text(m.text)
         is_me = m.author_node_id == self.state.node.node_id
         if is_me:
-            return f"[dim]{ts}[/dim] [bold green]{author}[/bold green]: {m.text}"
-        return f"[dim]{ts}[/dim] [bold]{author}[/bold]: {m.text}"
+            return f"[dim]{ts}[/dim] [bold green]{author}[/bold green]: {body}"
+        return f"[dim]{ts}[/dim] [bold]{author}[/bold]: {body}"
 
     def _log_system(self, msg: str) -> None:
         self.query_one("#message-log", RichLog).write(f"[dim italic]  {msg}[/dim italic]")
+
+    def _log_raw(self, msg: str) -> None:
+        """Write a line to the message log with full Rich markup, no auto-dimming."""
+        self.query_one("#message-log", RichLog).write(msg)
 
     # ── Rendezvous ───────────────────────────────────────────────────────────
 
@@ -581,12 +625,24 @@ class ChatScreen(Screen):
         cmd = parts[0].lower()
 
         if cmd == "/help":
-            self._log_system(
-                "Commands: /invite  /join <code>  /circles  /channels  "
-                "/channel create|join|switch|leave <name>  "
-                "/circle name <label>  /circle leave  "
-                "/who [channel]  /debug  /quit"
-            )
+            C = "bold cyan"   # command colour
+            A = "dim"         # arg colour
+            self._log_raw(f"[bold]─── Commands ───────────────────────────────────────[/bold]")
+            self._log_raw(f"  [{C}]/invite[/{C}]                         Show invite code for active circle")
+            self._log_raw(f"  [{C}]/join[/{C}] [{A}]<code>[/{A}]                    Join a circle from an invite code")
+            self._log_raw(f"  [{C}]/circles[/{C}]                        List all circles")
+            self._log_raw(f"  [{C}]/circle name[/{C}] [{A}]<label>[/{A}]            Rename the active circle (local)")
+            self._log_raw(f"  [{C}]/circle leave[/{C}]                   Leave and delete the active circle")
+            self._log_raw(f"  [{C}]/channels[/{C}]                       List channels in active circle")
+            self._log_raw(f"  [{C}]/channel create[/{C}] [{A}]<name> [mode][/{A}]  Create a channel (public/key/invite)")
+            self._log_raw(f"  [{C}]/channel join[/{C}] [{A}]<name>[/{A}]            Join a channel")
+            self._log_raw(f"  [{C}]/channel switch[/{C}] [{A}]<name>[/{A}]          Switch to a channel")
+            self._log_raw(f"  [{C}]/channel leave[/{C}] [{A}]<name>[/{A}]           Leave a channel")
+            self._log_raw(f"  [{C}]/who[/{C}] [{A}][channel][/{A}]                  Show members of a channel")
+            self._log_raw(f"  [{C}]/debug[/{C}]                          Toggle gossip debug log")
+            self._log_raw(f"  [{C}]/quit[/{C}]                           Exit")
+            self._log_raw(f"[bold]─── Formatting ─────────────────────────────────────[/bold]")
+            self._log_raw(f"  [bold]**bold**[/bold]   [italic]*italic*[/italic]   [bold bright_black on grey23] `code` [/bold bright_black on grey23]   [strike]~~strike~~[/strike]")
 
         elif cmd == "/quit":
             await self.app.action_quit()
