@@ -1,0 +1,276 @@
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import secrets
+from typing import Any, Dict, List, Optional
+
+from felundchat.crypto import make_token, verify_message_mac, verify_token
+from felundchat.models import ChatMessage, Peer, State, now_ts
+from felundchat.persistence import save_state
+from felundchat.transport import (
+    parse_hostport,
+    public_addr_hint,
+    read_frame,
+    write_frame,
+)
+
+
+class GossipNode:
+    def __init__(self, state: State):
+        self.state = state
+        self._lock = asyncio.Lock()
+        self._server: Optional[asyncio.AbstractServer] = None
+        self._stop_event = asyncio.Event()
+
+    def circles_list(self) -> List[str]:
+        return sorted(self.state.circles.keys())
+
+    def known_peers_for_circle(self, circle_id: str) -> List[Peer]:
+        member_ids = self.state.circle_members.get(circle_id, set())
+        peers = [self.state.peers[pid] for pid in member_ids if pid in self.state.peers]
+        return sorted(peers, key=lambda p: p.last_seen, reverse=True)
+
+    def message_ids_for_circle(self, circle_id: str) -> List[str]:
+        return sorted([mid for mid, m in self.state.messages.items() if m.circle_id == circle_id])
+
+    def messages_for_circle(self, circle_id: str) -> List[ChatMessage]:
+        msgs = [m for m in self.state.messages.values() if m.circle_id == circle_id]
+        return sorted(msgs, key=lambda m: (m.created_ts, m.msg_id))
+
+    async def start_server(self) -> None:
+        self._server = await asyncio.start_server(
+            self._handle_conn, self.state.node.bind, self.state.node.port
+        )
+        addrs = ", ".join(str(sock.getsockname()) for sock in (self._server.sockets or []))
+        print(f"[server] listening on {addrs}")
+
+    async def stop_server(self) -> None:
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    async def _handle_conn(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        peername = writer.get_extra_info("peername")
+        try:
+            hello = await read_frame(reader)
+            if hello.get("t") != "HELLO":
+                await write_frame(writer, {"t": "ERROR", "err": "Expected HELLO"})
+                return
+
+            peer_node_id = str(hello.get("node_id", ""))
+            circle_id = str(hello.get("circle_id", ""))
+            listen_addr = str(hello.get("listen_addr", "")) if hello.get("listen_addr") else ""
+            nonce = secrets.token_hex(16)
+
+            async with self._lock:
+                circle = self.state.circles.get(circle_id)
+                if not circle:
+                    await write_frame(writer, {"t": "ERROR", "err": "Unknown circle_id"})
+                    return
+
+            await write_frame(writer, {"t": "CHALLENGE", "nonce": nonce})
+            hello_auth = await read_frame(reader)
+            if hello_auth.get("t") != "HELLO_AUTH":
+                await write_frame(writer, {"t": "ERROR", "err": "Expected HELLO_AUTH"})
+                return
+
+            token = str(hello_auth.get("token", ""))
+
+            async with self._lock:
+                circle = self.state.circles.get(circle_id)
+                if not circle:
+                    await write_frame(writer, {"t": "ERROR", "err": "Unknown circle_id"})
+                    return
+                if not verify_token(circle.secret_hex, peer_node_id, circle_id, nonce, token):
+                    await write_frame(writer, {"t": "ERROR", "err": "Auth failed"})
+                    return
+
+                if listen_addr:
+                    self.state.peers[peer_node_id] = Peer(
+                        node_id=peer_node_id, addr=listen_addr, last_seen=now_ts()
+                    )
+                else:
+                    if peer_node_id in self.state.peers:
+                        self.state.peers[peer_node_id].last_seen = now_ts()
+
+                self.state.circle_members.setdefault(circle_id, set()).add(peer_node_id)
+                save_state(self.state)
+
+            await write_frame(writer, {"t": "WELCOME", "node_id": self.state.node.node_id})
+            await self._sync_with_connected_peer(reader, writer, circle_id)
+
+        except EOFError:
+            return
+        except Exception as e:
+            print(f"[server] error handling {peername}: {type(e).__name__}: {e}")
+            try:
+                await write_frame(writer, {"t": "ERROR", "err": "Internal error"})
+            except Exception:
+                pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def _sync_with_connected_peer(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        circle_id: str,
+    ) -> None:
+        # 1) Send our peer list + message ids
+        async with self._lock:
+            peers = [
+                {"node_id": p.node_id, "addr": p.addr, "last_seen": p.last_seen}
+                for p in self.known_peers_for_circle(circle_id)
+            ]
+            mids = self.message_ids_for_circle(circle_id)
+
+        await write_frame(writer, {"t": "PEERS", "circle_id": circle_id, "peers": peers})
+        await write_frame(writer, {"t": "MSGS_HAVE", "circle_id": circle_id, "msg_ids": mids})
+
+        # 2) Read their PEERS + MSGS_HAVE
+        their_peers = await read_frame(reader)
+        their_have = await read_frame(reader)
+
+        if their_peers.get("t") != "PEERS" or their_have.get("t") != "MSGS_HAVE":
+            await write_frame(writer, {"t": "ERROR", "err": "Bad sync frames"})
+            return
+
+        incoming_peers = their_peers.get("peers", [])
+        incoming_msg_ids = set(their_have.get("msg_ids", []))
+
+        # 3) Merge peers
+        async with self._lock:
+            self._merge_peers(circle_id, incoming_peers)
+            my_msg_ids = set(self.message_ids_for_circle(circle_id))
+
+        # 4) Request missing messages
+        missing = sorted(list(incoming_msg_ids - my_msg_ids))
+        await write_frame(writer, {"t": "MSGS_REQ", "circle_id": circle_id, "msg_ids": missing})
+
+        req = await read_frame(reader)
+        if req.get("t") != "MSGS_REQ":
+            await write_frame(writer, {"t": "ERROR", "err": "Expected MSGS_REQ"})
+            return
+        they_missing = req.get("msg_ids", [])
+
+        # 5) Send messages they're missing
+        async with self._lock:
+            send_msgs = []
+            for mid in they_missing:
+                m = self.state.messages.get(mid)
+                if m and m.circle_id == circle_id:
+                    send_msgs.append(dataclasses.asdict(m))
+        await write_frame(writer, {"t": "MSGS_SEND", "circle_id": circle_id, "messages": send_msgs})
+
+        # 6) Receive messages we requested
+        their_send = await read_frame(reader)
+        if their_send.get("t") != "MSGS_SEND":
+            await write_frame(writer, {"t": "ERROR", "err": "Expected MSGS_SEND"})
+            return
+        messages = their_send.get("messages", [])
+        async with self._lock:
+            self._merge_messages(circle_id, messages)
+            save_state(self.state)
+
+    def _merge_peers(self, circle_id: str, peer_dicts: List[Dict[str, Any]]) -> None:
+        members = self.state.circle_members.setdefault(circle_id, set())
+        for pd in peer_dicts:
+            node_id = str(pd.get("node_id", ""))
+            addr = str(pd.get("addr", ""))
+            last_seen = int(pd.get("last_seen", 0) or 0)
+            if not node_id or not addr:
+                continue
+            members.add(node_id)
+            existing = self.state.peers.get(node_id)
+            if (not existing) or (last_seen > existing.last_seen):
+                self.state.peers[node_id] = Peer(node_id=node_id, addr=addr, last_seen=last_seen)
+
+    def _merge_messages(self, circle_id: str, msg_dicts: List[Dict[str, Any]]) -> None:
+        circle = self.state.circles.get(circle_id)
+        if not circle:
+            return
+        for md in msg_dicts:
+            try:
+                m = ChatMessage(**md)
+            except TypeError:
+                continue
+            if m.circle_id != circle_id:
+                continue
+            if not verify_message_mac(circle.secret_hex, m):
+                continue
+            if m.msg_id not in self.state.messages:
+                self.state.messages[m.msg_id] = m
+
+    async def connect_and_sync(self, peer_addr: str, circle_id: str) -> None:
+        circle = self.state.circles.get(circle_id)
+        if not circle:
+            return
+
+        host, port = parse_hostport(peer_addr)
+        try:
+            reader, writer = await asyncio.open_connection(host, port)
+        except Exception:
+            return
+
+        try:
+            hello = {
+                "t": "HELLO",
+                "node_id": self.state.node.node_id,
+                "circle_id": circle_id,
+                "listen_addr": public_addr_hint(self.state.node.bind, self.state.node.port),
+            }
+            await write_frame(writer, hello)
+
+            challenge = await read_frame(reader)
+            if challenge.get("t") != "CHALLENGE":
+                print(f"[sync] {peer_addr} {circle_id}: expected CHALLENGE")
+                return
+
+            nonce = str(challenge.get("nonce", ""))
+            auth = {
+                "t": "HELLO_AUTH",
+                "token": make_token(circle.secret_hex, self.state.node.node_id, circle_id, nonce),
+            }
+            await write_frame(writer, auth)
+
+            resp = await read_frame(reader)
+            if resp.get("t") != "WELCOME":
+                print(f"[sync] {peer_addr} {circle_id}: rejected ({resp.get('err', 'unknown')})")
+                return
+
+            await self._sync_with_connected_peer(reader, writer, circle_id)
+
+        except Exception as e:
+            print(f"[sync] {peer_addr} {circle_id}: {type(e).__name__}: {e}")
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    async def gossip_loop(self, interval_s: int = 5) -> None:
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=interval_s)
+                break
+            except asyncio.TimeoutError:
+                pass
+            async with self._lock:
+                circles = list(self.state.circles.keys())
+            for cid in circles:
+                async with self._lock:
+                    peers = [p.addr for p in self.known_peers_for_circle(cid)]
+                for addr in peers[:5]:
+                    await self.connect_and_sync(addr, cid)

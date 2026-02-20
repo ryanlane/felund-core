@@ -1,4 +1,4 @@
-# felund-core
+# 🧚felund-core
 
 Simple peer-to-peer group chat over direct connections with gossip-based sync.
 
