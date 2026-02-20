@@ -10,13 +10,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import secrets
+import subprocess
+import sys
 import time
 from typing import List, Optional, Set
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Tree
 
 from felundchat.channel_sync import (
@@ -40,6 +42,100 @@ from felundchat.rendezvous_client import (
     unregister_presence,
 )
 from felundchat.transport import detect_local_ip, public_addr_hint
+
+
+# ---------------------------------------------------------------------------
+# Clipboard helper
+# ---------------------------------------------------------------------------
+
+def _try_copy_to_clipboard(text: str) -> bool:
+    """Try to copy *text* to the system clipboard. Returns True on success."""
+    if sys.platform == "win32":
+        cmds = [["clip"]]
+    elif sys.platform == "darwin":
+        cmds = [["pbcopy"]]
+    else:
+        cmds = [
+            ["xclip", "-selection", "clipboard"],
+            ["xsel", "--clipboard", "--input"],
+            ["clip.exe"],    # WSL
+            ["wl-copy"],     # Wayland
+        ]
+    for cmd in cmds:
+        try:
+            result = subprocess.run(cmd, input=text.encode(), capture_output=True, timeout=2)
+            if result.returncode == 0:
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            continue
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Invite code modal
+# ---------------------------------------------------------------------------
+
+class InviteModal(ModalScreen):
+    """Pop-up showing an invite code in a selectable input field."""
+
+    BINDINGS = [Binding("escape", "dismiss", "Close")]
+
+    DEFAULT_CSS = """
+    InviteModal {
+        align: center middle;
+    }
+    #invite-box {
+        width: 72;
+        height: auto;
+        border: solid $primary;
+        padding: 1 2;
+        background: $surface;
+    }
+    #invite-modal-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #invite-code-input {
+        width: 100%;
+        margin-bottom: 1;
+    }
+    #invite-hint {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+    #invite-status {
+        height: 1;
+        margin-bottom: 1;
+    }
+    #btn-invite-close {
+        width: 100%;
+    }
+    """
+
+    def __init__(self, code: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._code = code
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="invite-box"):
+            yield Label("Invite Code", id="invite-modal-title")
+            yield Input(value=self._code, id="invite-code-input")
+            yield Label("Ctrl+A  →  Ctrl+C to copy  |  Esc to close", id="invite-hint")
+            yield Label("", id="invite-status")
+            yield Button("Close", id="btn-invite-close", variant="primary")
+
+    async def on_mount(self) -> None:
+        self.query_one("#invite-code-input", Input).focus()
+        copied = await asyncio.to_thread(_try_copy_to_clipboard, self._code)
+        status = self.query_one("#invite-status", Label)
+        if copied:
+            status.update("[green]Copied to clipboard automatically[/green]")
+        else:
+            status.update("[dim]Auto-copy unavailable — use Ctrl+A, Ctrl+C above[/dim]")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-invite-close":
+            self.dismiss()
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +174,9 @@ class SetupScreen(Screen):
     .hidden {
         display: none;
     }
+    #input-circle-name {
+        margin-bottom: 0;
+    }
     #error-msg {
         color: $error;
         height: 1;
@@ -102,6 +201,8 @@ class SetupScreen(Screen):
             yield Input(placeholder="anon", id="input-name")
             yield Label("Listen port:", classes="field-label")
             yield Input(value="9999", id="input-port")
+            yield Label("Circle name (optional):", id="label-circle-name", classes="field-label")
+            yield Input(placeholder="e.g. family, work, game night", id="input-circle-name")
             yield Label("Invite code:", id="label-code", classes="field-label hidden")
             yield Input(placeholder="felund1....", id="input-code", classes="hidden")
             yield Label("", id="error-msg")
@@ -116,12 +217,16 @@ class SetupScreen(Screen):
             self.query_one("#btn-join").variant = "default"
             self.query_one("#input-code").add_class("hidden")
             self.query_one("#label-code").add_class("hidden")
+            self.query_one("#input-circle-name").remove_class("hidden")
+            self.query_one("#label-circle-name").remove_class("hidden")
         elif bid == "btn-join":
             self._mode = "join"
             self.query_one("#btn-join").variant = "primary"
             self.query_one("#btn-host").variant = "default"
             self.query_one("#input-code").remove_class("hidden")
             self.query_one("#label-code").remove_class("hidden")
+            self.query_one("#input-circle-name").add_class("hidden")
+            self.query_one("#label-circle-name").add_class("hidden")
         elif bid == "btn-start":
             await self._do_start()
 
@@ -146,15 +251,20 @@ class SetupScreen(Screen):
         state.node.bind = detect_local_ip()
 
         initial_msg: Optional[str] = None
+        initial_invite_code: Optional[str] = None
         bootstrap_peer: Optional[str] = None
         bootstrap_circle: Optional[str] = None
 
         if self._mode == "host":
             circle = create_circle(state)
+            circle_name = self.query_one("#input-circle-name", Input).value.strip()
+            if circle_name:
+                circle.name = circle_name
             save_state(state)
             addr = public_addr_hint(state.node.bind, state.node.port)
-            code = make_felund_code(circle.secret_hex, addr)
-            initial_msg = f"Circle ready! Share this invite code with friends:\n{code}"
+            initial_invite_code = make_felund_code(circle.secret_hex, addr)
+            label = f'"{circle_name}"' if circle_name else circle.circle_id[:8]
+            initial_msg = f"Circle {label} created! Share the invite code with friends."
         else:
             code_val = self.query_one("#input-code", Input).value.strip()
             try:
@@ -175,6 +285,7 @@ class SetupScreen(Screen):
             ChatScreen(
                 state,
                 initial_msg=initial_msg,
+                initial_invite_code=initial_invite_code,
                 bootstrap_peer=bootstrap_peer,
                 bootstrap_circle=bootstrap_circle,
             )
@@ -221,6 +332,7 @@ class ChatScreen(Screen):
         self,
         state: State,
         initial_msg: Optional[str] = None,
+        initial_invite_code: Optional[str] = None,
         bootstrap_peer: Optional[str] = None,
         bootstrap_circle: Optional[str] = None,
         **kwargs,
@@ -228,6 +340,7 @@ class ChatScreen(Screen):
         super().__init__(**kwargs)
         self.state = state
         self._initial_msg = initial_msg
+        self._initial_invite_code = initial_invite_code
         self._bootstrap_peer = bootstrap_peer
         self._bootstrap_circle = bootstrap_circle
         self.node: Optional[GossipNode] = None
@@ -276,6 +389,9 @@ class ChatScreen(Screen):
         if self._initial_msg:
             self._log_system(self._initial_msg)
 
+        if self._initial_invite_code:
+            self.call_after_refresh(self.app.push_screen, InviteModal(self._initial_invite_code))
+
         self.set_interval(1.0, self._poll_new_messages)
         self.set_interval(10.0, self._refresh_sidebar)
 
@@ -302,11 +418,15 @@ class ChatScreen(Screen):
 
     # ── Sidebar ──────────────────────────────────────────────────────────────
 
+    def _circle_label(self, cid: str) -> str:
+        circle = self.state.circles.get(cid)
+        return circle.name if circle and circle.name else cid[:8]
+
     def _refresh_sidebar(self) -> None:
         tree = self.query_one("#circle-tree", Tree)
         tree.clear()
         for cid in sorted(self.state.circles.keys()):
-            circle_node = tree.root.add(f"* {cid[:8]}", data={"type": "circle", "cid": cid})
+            circle_node = tree.root.add(f"* {self._circle_label(cid)}", data={"type": "circle", "cid": cid})
             ensure_default_channel(self.state, cid)
             for ch_id in sorted(self.state.channels.get(cid, {}).keys()):
                 active = (cid == self._current_circle_id and ch_id == self._current_channel)
@@ -319,9 +439,9 @@ class ChatScreen(Screen):
         peers = 0
         if self._current_circle_id:
             peers = max(0, len(self.state.circle_members.get(self._current_circle_id, set())) - 1)
-        cid_short = self._current_circle_id[:8] if self._current_circle_id else "none"
+        label = self._circle_label(self._current_circle_id) if self._current_circle_id else "none"
         peer_word = "peer" if peers == 1 else "peers"
-        self.title = f"felundchat  {cid_short} | #{self._current_channel} | {peers} {peer_word}"
+        self.title = f"felundchat  {label} | #{self._current_channel} | {peers} {peer_word}"
 
     # ── Message log ──────────────────────────────────────────────────────────
 
@@ -463,7 +583,9 @@ class ChatScreen(Screen):
         if cmd == "/help":
             self._log_system(
                 "Commands: /invite  /join <code>  /circles  /channels  "
-                "/channel create|join|switch|leave <name>  /who [channel]  /debug  /quit"
+                "/channel create|join|switch|leave <name>  "
+                "/circle name <label>  /circle leave  "
+                "/who [channel]  /debug  /quit"
             )
 
         elif cmd == "/quit":
@@ -473,7 +595,8 @@ class ChatScreen(Screen):
             for cid in sorted(self.state.circles.keys()):
                 count = len(self.state.circle_members.get(cid, set()))
                 active = " <" if cid == self._current_circle_id else ""
-                self._log_system(f"  {cid[:8]} ({count} members){active}")
+                label = self._circle_label(cid)
+                self._log_system(f"  {label} ({count} members){active}")
 
         elif cmd == "/channels":
             if not self._current_circle_id:
@@ -492,7 +615,7 @@ class ChatScreen(Screen):
             if circle:
                 addr = public_addr_hint(self.state.node.bind, self.state.node.port)
                 code = make_felund_code(circle.secret_hex, addr)
-                self._log_system(f"Invite code: {code}")
+                await self.app.push_screen(InviteModal(code))
 
         elif cmd == "/join":
             if len(parts) < 2:
@@ -537,11 +660,69 @@ class ChatScreen(Screen):
                 self.node.debug_sync = not self.node.debug_sync
                 self._log_system(f"Sync debug: {'on' if self.node.debug_sync else 'off'}")
 
+        elif cmd == "/circle":
+            await self._circle_mgmt_cmd(parts[1:])
+
         elif cmd == "/channel":
             await self._channel_cmd(parts[1:])
 
         else:
             self._log_system(f"Unknown command '{cmd}'. Type /help.")
+
+    async def _circle_mgmt_cmd(self, args: list) -> None:
+        if not args:
+            self._log_system("Usage: /circle name <label>  |  /circle leave")
+            return
+        sub = args[0].lower()
+
+        if sub == "name":
+            if len(args) < 2:
+                self._log_system("Usage: /circle name <friendly label>")
+                return
+            if not self._current_circle_id:
+                self._log_system("No active circle.")
+                return
+            new_name = " ".join(args[1:]).strip()
+            circle = self.state.circles.get(self._current_circle_id)
+            if circle:
+                circle.name = new_name
+                save_state(self.state)
+                self._refresh_sidebar()
+                self._log_system(f"Circle renamed to '{new_name}'.")
+
+        elif sub == "leave":
+            cid = self._current_circle_id
+            if not cid:
+                self._log_system("No active circle.")
+                return
+            label = self._circle_label(cid)
+            # Remove all state for this circle
+            self.state.circles.pop(cid, None)
+            self.state.circle_members.pop(cid, None)
+            self.state.channels.pop(cid, None)
+            self.state.channel_members.pop(cid, None)
+            self.state.channel_requests.pop(cid, None)
+            to_drop = [mid for mid, m in self.state.messages.items() if m.circle_id == cid]
+            for mid in to_drop:
+                del self.state.messages[mid]
+            save_state(self.state)
+            self._log_system(f"Left circle '{label}'.")
+            remaining = sorted(self.state.circles.keys())
+            if remaining:
+                self._current_circle_id = remaining[0]
+                self._current_channel = "general"
+                self._seen = set()
+                self.query_one("#message-log", RichLog).clear()
+                self._refresh_sidebar()
+                self._load_history()
+            else:
+                self._current_circle_id = None
+                self.query_one("#message-log", RichLog).clear()
+                self._refresh_sidebar()
+                await self.app.push_screen(SetupScreen())
+
+        else:
+            self._log_system("Usage: /circle name <label>  |  /circle leave")
 
     async def _channel_cmd(self, args: list) -> None:
         if not args or not self._current_circle_id:

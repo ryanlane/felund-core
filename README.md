@@ -1,142 +1,181 @@
-# 🧚felund-core
+# felund-core
 
 Simple peer-to-peer group chat over direct connections with gossip-based sync.
 
 ## Requirements
 
-- Python 3.10+ (3.11+ recommended)
+- Python 3.9+ (3.11+ recommended)
 - Two terminals/devices on the same LAN or reachable network
 - Open/forwarded port (default: 9999) if connecting across networks
 
-## Install
-
-No package install is required.
-
-1. Clone the repo
-2. Open the project folder
-3. Run the chat CLI:
+## Setup
 
 ```bash
-python chat/felundchat.py
+git clone <repo>
+cd felund-core
+bash setup.sh
 ```
 
-State is stored at:
+This creates a `.venv/` at the project root and installs all dependencies for both
+the chat client and the optional API service.
 
-- `~/.felundchat/state.json`
+State is stored at `~/.felundchat/state.json`.
 
-## Quick Start (Interactive)
-
-Run:
+## Running the TUI
 
 ```bash
-python chat/felundchat.py
+.venv/bin/python chat/felundchat.py
 ```
 
-You will be prompted for:
-
-- Mode: `host` or `client`
-- Display name
-- Listen port (default `9999`)
-
-### Host flow
-
-1. Choose `host`
-2. The app generates a single **felund code** (contains secret + peer address)
-3. Share that code with your friend
-4. Chat starts immediately in the same terminal
-
-### Client flow
-
-1. Choose `client`
-2. Paste the **felund code** from the host
-3. Chat starts and syncs with host/peers
-
-## Chat Commands (Interactive Mode)
-
-- `/circles` list joined circles
-- `/switch` switch active circle
-- `/inbox` show recent messages
-- `/debug` toggle local sync debug logs on/off
-- `/quit` exit chat
-
-## Manual/Legacy CLI Commands
-
-Initialize local node settings:
+This launches the panel-based terminal UI (default). You can also be explicit:
 
 ```bash
-python chat/felundchat.py init --bind 192.168.1.10 --port 9999 --name Ryan
+.venv/bin/python chat/felundchat.py tui
 ```
 
-Create a circle + show invite code:
+### First run — Setup wizard
 
-```bash
-python chat/felundchat.py invite
+If no circles exist you are taken through a short wizard:
+
+1. Choose **Host** or **Join**
+2. Enter your display name and listen port (default: 9999)
+3. **Host**: a felund invite code is generated — share it with your friend
+4. **Join**: paste the felund code from the host
+
+### TUI layout
+
+```
+┌─ felundchat ─────────────────────────────────────────────────────┐
+│ node: a3f8b2 | #general | 2 peers                     ctrl+q=quit│
+├──────────────────┬────────────────────────────────────────────────┤
+│ Circles          │ [10:32] alice: hey everyone                    │
+│ ────────────────  │ [10:33] bob: yo                               │
+│ ● mygroup        │ [10:35] you: what's up                        │
+│   #general ←     │                                                │
+│   #random        │                                                │
+│                  │                                                │
+├──────────────────┴────────────────────────────────────────────────┤
+│ > _                                                               │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
-Join using a single code:
+Click a channel in the sidebar to switch context. The header shows live peer count.
+
+### TUI keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `ctrl+q` | Quit |
+| `ctrl+i` | Show invite code for active circle |
+| `escape` | Re-focus input bar |
+
+### TUI slash commands
+
+Type these in the input bar:
+
+| Command | Action |
+|---------|--------|
+| `/help` | List all commands |
+| `/invite` | Show invite code for the active circle |
+| `/join <code>` | Join a new circle via felund code |
+| `/circles` | List joined circles |
+| `/channels` | List channels in the active circle |
+| `/channel create <name> [public\|key\|invite]` | Create a channel |
+| `/channel join <name> [key]` | Join a channel |
+| `/channel switch <name>` | Switch active channel |
+| `/channel leave <name>` | Leave a channel |
+| `/who [channel]` | Show members in the active (or named) channel |
+| `/debug` | Toggle gossip debug log |
+| `/quit` | Exit |
+
+## CLI subcommands
+
+All legacy CLI commands still work:
 
 ```bash
-python chat/felundchat.py join --code <felund_code>
+# Initialize local node settings
+.venv/bin/python chat/felundchat.py init --bind 192.168.1.10 --port 9999 --name Alice
+
+# Create a circle + print invite code
+.venv/bin/python chat/felundchat.py invite
+
+# Join via single invite code
+.venv/bin/python chat/felundchat.py join --code <felund_code>
+
+# Legacy join (still supported)
+.venv/bin/python chat/felundchat.py join --secret <hex> --peer <host:port>
+
+# Start gossip service (headless)
+.venv/bin/python chat/felundchat.py run
+
+# Send a message from the command line
+.venv/bin/python chat/felundchat.py send --circle-id <id> "hello world"
+
+# Show inbox
+.venv/bin/python chat/felundchat.py inbox --circle-id <id> --limit 50
+
+# List circles or peers in a circle
+.venv/bin/python chat/felundchat.py peers
+.venv/bin/python chat/felundchat.py peers --circle-id <id>
 ```
 
-Legacy join (still supported):
+## Optional API-assisted discovery
+
+An optional rendezvous API is included for internet-style peer discovery.
+
+Start the API:
 
 ```bash
-python chat/felundchat.py join --secret <secret_hex> --peer <host:port>
+.venv/bin/uvicorn api.rendezvous:app --reload
 ```
 
-Run gossip service:
+Enable in the chat client:
 
 ```bash
-python chat/felundchat.py run
-```
-
-Send a message from CLI:
-
-```bash
-python chat/felundchat.py send --circle-id <circle_id> "hello world"
-```
-
-Show inbox:
-
-```bash
-python chat/felundchat.py inbox --circle-id <circle_id> --limit 50
-```
-
-List circles/peers:
-
-```bash
-python chat/felundchat.py peers
-python chat/felundchat.py peers --circle-id <circle_id>
-```
-
-## Notes
-
-- The app auto-detects your local IP for peer sharing.
-- Keep at least one node online so gossip can propagate messages.
-- For cross-network use, ensure the chosen port is reachable.
-- Sync debug logs are local-only and off by default.
-
-## Optional API-Assisted Discovery (MVP)
-
-An optional rendezvous API scaffold is included for internet-style peer discovery.
-
-- API service: `api/rendezvous.py`
-- Enable in chat client by setting `FELUND_API_BASE`
-
-Linux/macOS:
-
-```bash
-export FELUND_API_BASE=http://127.0.0.1:8080
-python chat/felundchat.py
+export FELUND_API_BASE=http://127.0.0.1:8000
+.venv/bin/python chat/felundchat.py
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:FELUND_API_BASE = "http://127.0.0.1:8080"
-python chat/felundchat.py
+$env:FELUND_API_BASE = "http://127.0.0.1:8000"
+.venv\Scripts\python chat\felundchat.py
 ```
+
+## Package structure
+
+```
+felund-core/
+├── setup.sh                  # One-shot venv + dependency install
+├── .venv/                    # Shared virtual environment
+├── api/
+│   ├── rendezvous.py         # FastAPI rendezvous service (optional)
+│   └── requirements.txt
+└── chat/
+    ├── felundchat.py         # Entry-point shim
+    ├── requirements.txt
+    └── felundchat/
+        ├── config.py         # Constants (state file path, limits)
+        ├── models.py         # Dataclasses: State, Circle, Peer, Channel, ChatMessage
+        ├── crypto.py         # HMAC MAC generation and SHA-256 helpers
+        ├── invite.py         # felund code encode/decode
+        ├── transport.py      # TCP framing, IP detection
+        ├── persistence.py    # load_state / save_state (JSON)
+        ├── gossip.py         # GossipNode — TCP server + gossip loop
+        ├── channel_sync.py   # Channel event messages and apply logic
+        ├── rendezvous_client.py  # Optional API peer discovery
+        ├── chat.py           # Circle/channel management helpers
+        ├── cli.py            # argparse subcommands
+        └── tui.py            # Textual panel TUI
+```
+
+## Notes
+
+- The app auto-detects your local IP for peer sharing.
+- Keep at least one node running so gossip can propagate messages.
+- For cross-network use, ensure the chosen port is reachable from the internet.
+- Sync debug logs are local-only and off by default.
 
 ## Docs
 
