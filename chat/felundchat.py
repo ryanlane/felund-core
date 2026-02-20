@@ -18,11 +18,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import dataclasses
 import hashlib
 import hmac
 import json
-import os
 import secrets
 import socket
 import time
@@ -33,6 +33,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 APP_DIR = Path.home() / ".felundchat"
 STATE_FILE = APP_DIR / "state.json"
 MSG_MAX = 16_384  # bytes per frame, keep it small
+READ_TIMEOUT_S = 30
+MESSAGE_MAX_AGE_S = 30 * 24 * 60 * 60
+MAX_MESSAGES_PER_CIRCLE = 1_000
 
 
 def now_ts() -> int:
@@ -63,6 +66,7 @@ class NodeConfig:
     node_id: str
     bind: str
     port: int
+    display_name: str = "anon"
 
 
 @dataclasses.dataclass
@@ -85,6 +89,8 @@ class ChatMessage:
     author_node_id: str
     created_ts: int
     text: str
+    display_name: str = ""
+    mac: str = ""
 
 
 @dataclasses.dataclass
@@ -99,12 +105,24 @@ class State:
     def default(bind: str, port: int) -> "State":
         node_id = sha256_hex(secrets.token_bytes(32))[:24]
         return State(
-            node=NodeConfig(node_id=node_id, bind=bind, port=port),
+            node=NodeConfig(node_id=node_id, bind=bind, port=port, display_name="anon"),
             circles={},
             peers={},
             circle_members={},
             messages={},
         )
+
+
+def detect_local_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return str(s.getsockname()[0])
+        finally:
+            s.close()
+    except Exception:
+        return "127.0.0.1"
 
 
 def ensure_app_dir() -> None:
@@ -127,11 +145,18 @@ def load_state() -> State:
     for mid, m in data.get("messages", {}).items():
         messages[mid] = ChatMessage(**m)
 
-    return State(node=node, circles=circles, peers=peers, circle_members=circle_members, messages=messages)
+    state = State(node=node, circles=circles, peers=peers, circle_members=circle_members, messages=messages)
+    if not state.node.bind or state.node.bind == "0.0.0.0":
+        state.node.bind = detect_local_ip()
+    if not state.node.display_name:
+        state.node.display_name = "anon"
+    prune_messages(state)
+    return state
 
 
 def save_state(state: State) -> None:
     ensure_app_dir()
+    prune_messages(state)
     data = {
         "node": dataclasses.asdict(state.node),
         "circles": {cid: dataclasses.asdict(c) for cid, c in state.circles.items()},
@@ -153,8 +178,19 @@ def save_state(state: State) -> None:
 #   "t": "HELLO",
 #   "node_id": "...",
 #   "circle_id": "...",
-#   "token": "..."  (HMAC(secret, node_id||circle_id))
 #   "listen_addr": "host:port"  (optional hint)
+# }
+#
+# Server -> Client: CHALLENGE / ERROR
+# {
+#   "t": "CHALLENGE",
+#   "nonce": "..."
+# }
+#
+# Client -> Server: HELLO_AUTH
+# {
+#   "t": "HELLO_AUTH",
+#   "token": "..."  (HMAC(secret, node_id||circle_id||nonce))
 # }
 #
 # Server -> Client: WELCOME / ERROR
@@ -166,14 +202,49 @@ def save_state(state: State) -> None:
 #  - MSGS_SEND: full message objects for requested ids
 
 
-def make_token(secret_hex: str, node_id: str, circle_id: str) -> str:
+def make_token(secret_hex: str, node_id: str, circle_id: str, nonce: str) -> str:
     secret = bytes.fromhex(secret_hex)
-    payload = f"{node_id}|{circle_id}".encode("utf-8")
+    payload = f"{node_id}|{circle_id}|{nonce}".encode("utf-8")
     return hmac_hex(secret, payload)
 
 
-def verify_token(secret_hex: str, node_id: str, circle_id: str, token: str) -> bool:
-    return hmac.compare_digest(make_token(secret_hex, node_id, circle_id), token)
+def verify_token(secret_hex: str, node_id: str, circle_id: str, nonce: str, token: str) -> bool:
+    return hmac.compare_digest(make_token(secret_hex, node_id, circle_id, nonce), token)
+
+
+def make_message_mac(secret_hex: str, msg: ChatMessage) -> str:
+    secret = bytes.fromhex(secret_hex)
+    payload = (
+        f"{msg.msg_id}|{msg.circle_id}|{msg.author_node_id}|"
+        f"{msg.display_name}|{msg.created_ts}|{msg.text}"
+    ).encode("utf-8")
+    return hmac_hex(secret, payload)
+
+
+def verify_message_mac(secret_hex: str, msg: ChatMessage) -> bool:
+    if not msg.mac:
+        return False
+    return hmac.compare_digest(make_message_mac(secret_hex, msg), msg.mac)
+
+
+def prune_messages(state: State) -> None:
+    now = now_ts()
+    expired = [
+        mid for mid, message in state.messages.items()
+        if now - message.created_ts > MESSAGE_MAX_AGE_S
+    ]
+    for mid in expired:
+        state.messages.pop(mid, None)
+
+    for circle_id in state.circles.keys():
+        circle_msgs = [m for m in state.messages.values() if m.circle_id == circle_id]
+        if len(circle_msgs) <= MAX_MESSAGES_PER_CIRCLE:
+            continue
+        circle_msgs.sort(key=lambda message: (message.created_ts, message.msg_id))
+        keep_ids = {message.msg_id for message in circle_msgs[-MAX_MESSAGES_PER_CIRCLE:]}
+        drop_ids = [message.msg_id for message in circle_msgs if message.msg_id not in keep_ids]
+        for mid in drop_ids:
+            state.messages.pop(mid, None)
 
 
 async def write_frame(writer: asyncio.StreamWriter, obj: Dict[str, Any]) -> None:
@@ -185,7 +256,7 @@ async def write_frame(writer: asyncio.StreamWriter, obj: Dict[str, Any]) -> None
 
 
 async def read_frame(reader: asyncio.StreamReader) -> Dict[str, Any]:
-    line = await reader.readline()
+    line = await asyncio.wait_for(reader.readline(), timeout=READ_TIMEOUT_S)
     if not line:
         raise EOFError
     if len(line) > MSG_MAX:
@@ -196,15 +267,7 @@ async def read_frame(reader: asyncio.StreamReader) -> Dict[str, Any]:
 def public_addr_hint(bind: str, port: int) -> str:
     # Best-effort: try to guess a LAN IP for convenience in local testing.
     # Not reliable in multi-NIC setups.
-    host = bind
-    if bind == "0.0.0.0":
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            host = s.getsockname()[0]
-            s.close()
-        except Exception:
-            host = "127.0.0.1"
+    host = bind if bind and bind != "0.0.0.0" else detect_local_ip()
     return canonical_peer_addr(host, port)
 
 
@@ -217,6 +280,7 @@ class GossipNode:
         self.state = state
         self._lock = asyncio.Lock()
         self._server: Optional[asyncio.AbstractServer] = None
+        self._stop_event = asyncio.Event()
 
     def circles_list(self) -> List[str]:
         return sorted(self.state.circles.keys())
@@ -244,6 +308,9 @@ class GossipNode:
             await self._server.wait_closed()
             self._server = None
 
+    def stop(self) -> None:
+        self._stop_event.set()
+
     async def _handle_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peername = writer.get_extra_info("peername")
         try:
@@ -254,15 +321,29 @@ class GossipNode:
 
             peer_node_id = str(hello.get("node_id", ""))
             circle_id = str(hello.get("circle_id", ""))
-            token = str(hello.get("token", ""))
             listen_addr = str(hello.get("listen_addr", "")) if hello.get("listen_addr") else ""
+            nonce = secrets.token_hex(16)
 
             async with self._lock:
                 circle = self.state.circles.get(circle_id)
                 if not circle:
                     await write_frame(writer, {"t": "ERROR", "err": "Unknown circle_id"})
                     return
-                if not verify_token(circle.secret_hex, peer_node_id, circle_id, token):
+
+            await write_frame(writer, {"t": "CHALLENGE", "nonce": nonce})
+            hello_auth = await read_frame(reader)
+            if hello_auth.get("t") != "HELLO_AUTH":
+                await write_frame(writer, {"t": "ERROR", "err": "Expected HELLO_AUTH"})
+                return
+
+            token = str(hello_auth.get("token", ""))
+
+            async with self._lock:
+                circle = self.state.circles.get(circle_id)
+                if not circle:
+                    await write_frame(writer, {"t": "ERROR", "err": "Unknown circle_id"})
+                    return
+                if not verify_token(circle.secret_hex, peer_node_id, circle_id, nonce, token):
                     await write_frame(writer, {"t": "ERROR", "err": "Auth failed"})
                     return
 
@@ -285,8 +366,9 @@ class GossipNode:
         except EOFError:
             return
         except Exception as e:
+            print(f"[server] error handling {peername}: {type(e).__name__}: {e}")
             try:
-                await write_frame(writer, {"t": "ERROR", "err": f"{type(e).__name__}: {e}"})
+                await write_frame(writer, {"t": "ERROR", "err": "Internal error"})
             except Exception:
                 pass
         finally:
@@ -348,7 +430,7 @@ class GossipNode:
             return
         messages = their_send.get("messages", [])
         async with self._lock:
-            self._merge_messages(messages)
+            self._merge_messages(circle_id, messages)
             save_state(self.state)
 
     def _merge_peers(self, circle_id: str, peer_dicts: List[Dict[str, Any]]) -> None:
@@ -361,14 +443,21 @@ class GossipNode:
                 continue
             members.add(node_id)
             existing = self.state.peers.get(node_id)
-            if (not existing) or (last_seen > existing.last_seen) or (existing.addr != addr):
+            if (not existing) or (last_seen > existing.last_seen):
                 self.state.peers[node_id] = Peer(node_id=node_id, addr=addr, last_seen=last_seen)
 
-    def _merge_messages(self, msg_dicts: List[Dict[str, Any]]) -> None:
+    def _merge_messages(self, circle_id: str, msg_dicts: List[Dict[str, Any]]) -> None:
+        circle = self.state.circles.get(circle_id)
+        if not circle:
+            return
         for md in msg_dicts:
             try:
                 m = ChatMessage(**md)
             except TypeError:
+                continue
+            if m.circle_id != circle_id:
+                continue
+            if not verify_message_mac(circle.secret_hex, m):
                 continue
             if m.msg_id not in self.state.messages:
                 self.state.messages[m.msg_id] = m
@@ -389,20 +478,32 @@ class GossipNode:
                 "t": "HELLO",
                 "node_id": self.state.node.node_id,
                 "circle_id": circle_id,
-                "token": make_token(circle.secret_hex, self.state.node.node_id, circle_id),
                 "listen_addr": public_addr_hint(self.state.node.bind, self.state.node.port),
+            }
+            await write_frame(writer, hello)
+
+            challenge = await read_frame(reader)
+            if challenge.get("t") != "CHALLENGE":
+                print(f"[sync] {peer_addr} {circle_id}: expected CHALLENGE")
+                return
+
+            nonce = str(challenge.get("nonce", ""))
+            hello = {
+                "t": "HELLO_AUTH",
+                "token": make_token(circle.secret_hex, self.state.node.node_id, circle_id, nonce),
             }
             await write_frame(writer, hello)
 
             resp = await read_frame(reader)
             if resp.get("t") != "WELCOME":
+                print(f"[sync] {peer_addr} {circle_id}: rejected ({resp.get('err', 'unknown')})")
                 return
 
             # Server side will now send PEERS + MSGS_HAVE; we will respond accordingly.
             await self._sync_with_connected_peer(reader, writer, circle_id)
 
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[sync] {peer_addr} {circle_id}: {type(e).__name__}: {e}")
         finally:
             try:
                 writer.close()
@@ -411,8 +512,12 @@ class GossipNode:
                 pass
 
     async def gossip_loop(self, interval_s: int = 5) -> None:
-        while True:
-            await asyncio.sleep(interval_s)
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=interval_s)
+                break
+            except asyncio.TimeoutError:
+                pass
             async with self._lock:
                 circles = list(self.state.circles.keys())
             for cid in circles:
@@ -423,6 +528,192 @@ class GossipNode:
                     await self.connect_and_sync(addr, cid)
 
 
+def create_circle(state: State) -> Circle:
+    secret = secrets.token_bytes(32)
+    secret_hex = secret.hex()
+    circle_id = sha256_hex(secret)[:24]
+    circle = Circle(circle_id=circle_id, secret_hex=secret_hex)
+    state.circles[circle_id] = circle
+    state.circle_members.setdefault(circle_id, set()).add(state.node.node_id)
+    return circle
+
+
+def render_message(m: ChatMessage) -> str:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.created_ts))
+    author = m.display_name or m.author_node_id[:8]
+    return f"[{ts}] {author}: {m.text}"
+
+
+def choose_circle_id(state: State, preferred: Optional[str] = None) -> Optional[str]:
+    circles = sorted(state.circles.keys())
+    if not circles:
+        return None
+    if preferred and preferred in state.circles:
+        return preferred
+    if len(circles) == 1:
+        return circles[0]
+
+    print("Available circles:")
+    for i, cid in enumerate(circles, start=1):
+        print(f" {i}) {cid}")
+
+    while True:
+        raw = input("Select a circle number: ").strip()
+        try:
+            idx = int(raw)
+            if 1 <= idx <= len(circles):
+                return circles[idx - 1]
+        except ValueError:
+            pass
+        print("Invalid selection.")
+
+
+async def interactive_chat(node: GossipNode, state: State, selected_circle_id: Optional[str]) -> None:
+    circle_id = choose_circle_id(state, selected_circle_id)
+    if not circle_id:
+        print("No circles available.")
+        return
+
+    seen: Set[str] = set()
+
+    async def watch_incoming() -> None:
+        while not node._stop_event.is_set():
+            async with node._lock:
+                msgs = [m for m in state.messages.values() if m.circle_id == circle_id]
+                msgs.sort(key=lambda m: (m.created_ts, m.msg_id))
+            for m in msgs:
+                if m.msg_id in seen:
+                    continue
+                seen.add(m.msg_id)
+                print(render_message(m))
+            await asyncio.sleep(1)
+
+    watcher = asyncio.create_task(watch_incoming())
+    print("Chat ready. Type messages and press Enter.")
+    print("Commands: /switch, /circles, /inbox, /quit")
+
+    try:
+        while True:
+            raw = await asyncio.to_thread(input, f"[{circle_id[:8]}] > ")
+            text = raw.strip()
+            if not text:
+                continue
+            if text == "/quit":
+                return
+            if text == "/circles":
+                for cid in sorted(state.circles.keys()):
+                    print(f" - {cid}")
+                continue
+            if text == "/switch":
+                next_cid = choose_circle_id(state)
+                if next_cid:
+                    circle_id = next_cid
+                    seen = set()
+                continue
+            if text == "/inbox":
+                async with node._lock:
+                    msgs = [m for m in state.messages.values() if m.circle_id == circle_id]
+                    msgs.sort(key=lambda m: (m.created_ts, m.msg_id))
+                for m in msgs[-20:]:
+                    print(render_message(m))
+                continue
+
+            created = now_ts()
+            msg_id = sha256_hex(f"{state.node.node_id}|{created}|{secrets.token_hex(8)}".encode("utf-8"))[:32]
+            msg = ChatMessage(
+                msg_id=msg_id,
+                circle_id=circle_id,
+                author_node_id=state.node.node_id,
+                display_name=state.node.display_name,
+                created_ts=created,
+                text=text,
+            )
+            circle = state.circles.get(circle_id)
+            if not circle:
+                print("Selected circle no longer exists.")
+                continue
+            msg.mac = make_message_mac(circle.secret_hex, msg)
+            async with node._lock:
+                state.messages[msg_id] = msg
+                save_state(state)
+            print(render_message(msg))
+    finally:
+        node.stop()
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher
+
+
+async def run_interactive_flow() -> None:
+    state = load_state()
+
+    print("Select mode:")
+    print(" 1) host")
+    print(" 2) client")
+    mode_raw = input("Mode [1]: ").strip().lower()
+    mode = "client" if mode_raw in {"2", "client", "c"} else "host"
+
+    current_name = state.node.display_name or "anon"
+    entered_name = input(f"Display name [{current_name}]: ").strip()
+    state.node.display_name = entered_name or current_name
+
+    local_ip = detect_local_ip()
+    state.node.bind = local_ip
+
+    default_port = state.node.port or 9999
+    while True:
+        port_raw = input(f"Listen port [{default_port}]: ").strip()
+        if not port_raw:
+            state.node.port = default_port
+            break
+        try:
+            state.node.port = int(port_raw)
+            if state.node.port <= 0 or state.node.port > 65535:
+                raise ValueError
+            break
+        except ValueError:
+            print("Enter a valid port (1-65535).")
+
+    selected_circle_id: Optional[str] = None
+    peer: Optional[str] = None
+
+    if mode == "host":
+        circle = create_circle(state)
+        selected_circle_id = circle.circle_id
+        save_state(state)
+
+        bootstrap = public_addr_hint(state.node.bind, state.node.port)
+        print()
+        print("Invite generated:")
+        print(f" secret: {circle.secret_hex}")
+        print(f" peer  : {bootstrap}")
+    else:
+        secret_hex = input("Paste circle secret: ").strip().lower()
+        peer = input("Paste bootstrap peer host:port: ").strip()
+
+        secret = bytes.fromhex(secret_hex)
+        circle_id = sha256_hex(secret)[:24]
+        state.circles[circle_id] = Circle(circle_id=circle_id, secret_hex=secret_hex)
+        state.circle_members.setdefault(circle_id, set()).add(state.node.node_id)
+        selected_circle_id = circle_id
+        save_state(state)
+
+    node = GossipNode(state)
+    await node.start_server()
+    gossip_task = asyncio.create_task(node.gossip_loop(interval_s=5))
+
+    try:
+        if mode == "client" and peer:
+            await node.connect_and_sync(peer, selected_circle_id or "")
+        await interactive_chat(node, state, selected_circle_id)
+    finally:
+        node.stop()
+        gossip_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await gossip_task
+        await node.stop_server()
+
+
 # ---------------------------
 # CLI Commands
 # ---------------------------
@@ -431,6 +722,8 @@ def cmd_init(args: argparse.Namespace) -> None:
     state = load_state()
     state.node.bind = args.bind
     state.node.port = args.port
+    if args.name:
+        state.node.display_name = args.name.strip()
     # Preserve existing node_id if present
     if not state.node.node_id:
         state.node.node_id = sha256_hex(secrets.token_bytes(32))[:24]
@@ -443,21 +736,16 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 def cmd_invite(args: argparse.Namespace) -> None:
     state = load_state()
-    secret = secrets.token_bytes(32)
-    secret_hex = secret.hex()
-    circle_id = sha256_hex(secret)[:24]
-    circle = Circle(circle_id=circle_id, secret_hex=secret_hex)
-    state.circles[circle_id] = circle
-    state.circle_members.setdefault(circle_id, set()).add(state.node.node_id)
+    circle = create_circle(state)
     save_state(state)
 
     bootstrap = public_addr_hint(state.node.bind, state.node.port)
     print("Circle created.")
-    print(f" circle_id   : {circle_id}")
-    print(f" circle_secret (hex): {secret_hex}")
+    print(f" circle_id   : {circle.circle_id}")
+    print(f" circle_secret (hex): {circle.secret_hex}")
     print()
     print("Share this join command with a friend:")
-    print(f"  python felundchat.py join --secret {secret_hex} --peer {bootstrap}")
+    print(f"  python felundchat.py join --secret {circle.secret_hex} --peer {bootstrap}")
     print()
     print("Then run your node:")
     print("  python felundchat.py run")
@@ -519,9 +807,11 @@ def cmd_send(args: argparse.Namespace) -> None:
         msg_id=msg_id,
         circle_id=cid,
         author_node_id=state.node.node_id,
+        display_name=state.node.display_name,
         created_ts=created,
         text=text,
     )
+    msg.mac = make_message_mac(state.circles[cid].secret_hex, msg)
     state.messages[msg_id] = msg
     save_state(state)
     print(f"Queued message {msg_id}. It will gossip out while `run` is active.")
@@ -533,10 +823,14 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     async def main():
         await node.start_server()
-        # optional: immediate bootstrap attempt to a peer if provided
-        if args.peer and args.circle_id:
-            await node.connect_and_sync(args.peer, args.circle_id)
-        await node.gossip_loop(interval_s=args.interval)
+        try:
+            # optional: immediate bootstrap attempt to a peer if provided
+            if args.peer and args.circle_id:
+                await node.connect_and_sync(args.peer, args.circle_id)
+            await node.gossip_loop(interval_s=args.interval)
+        finally:
+            node.stop()
+            await node.stop_server()
 
     try:
         asyncio.run(main())
@@ -553,19 +847,21 @@ def cmd_inbox(args: argparse.Namespace) -> None:
     msgs = [m for m in state.messages.values() if m.circle_id == cid]
     msgs.sort(key=lambda m: (m.created_ts, m.msg_id))
     for m in msgs[-args.limit:]:
-        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.created_ts))
-        author = m.author_node_id[:8]
-        print(f"[{ts}] {author}: {m.text}")
+        print(render_message(m))
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="felundchat", description="Simple gossip + direct connect chat")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd", required=False)
 
     sp = sub.add_parser("init", help="Initialize local node")
-    sp.add_argument("--bind", default="0.0.0.0", help="Bind address (default 0.0.0.0)")
+    sp.add_argument("--bind", default=detect_local_ip(), help="Bind address (default: detected local IP)")
     sp.add_argument("--port", type=int, default=9999, help="Listen port")
+    sp.add_argument("--name", help="Display name")
     sp.set_defaults(func=cmd_init)
+
+    sp = sub.add_parser("interactive", help="Run guided host/client setup + chat")
+    sp.set_defaults(func=None)
 
     sp = sub.add_parser("invite", help="Create a new circle and print an invite")
     sp.set_defaults(func=cmd_invite)
@@ -601,6 +897,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    if not getattr(args, "cmd", None) or args.cmd == "interactive":
+        asyncio.run(run_interactive_flow())
+        return
     args.func(args)
 
 
