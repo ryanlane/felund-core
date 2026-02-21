@@ -177,6 +177,17 @@ def cmd_inbox(args: argparse.Namespace) -> None:
         print(render_message(m, state))
 
 
+def cmd_tui(args: argparse.Namespace) -> bool:
+    try:
+        from felundchat.tui import FelundApp
+    except Exception as e:
+        print(f"Unable to launch TUI: {e}")
+        print("Install dependency: pip install textual")
+        return False
+    FelundApp().run()
+    return True
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="felundchat", description="Simple gossip + direct connect chat")
     sub = p.add_subparsers(dest="cmd", required=False)
@@ -189,6 +200,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("interactive", help="Run guided host/client setup + chat")
     sp.set_defaults(func=None)
+
+    sp = sub.add_parser("tui", help="Run panel-based terminal UI")
+    sp.set_defaults(func=cmd_tui)
 
     sp = sub.add_parser("invite", help="Create a new circle and print an invite")
     sp.set_defaults(func=cmd_invite)
@@ -227,7 +241,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    if not getattr(args, "cmd", None) or args.cmd == "interactive":
+    if not getattr(args, "cmd", None):
+        if not cmd_tui(args):
+            asyncio.run(run_interactive_flow())
+        return
+    if args.cmd == "tui":
+        if not cmd_tui(args):
+            asyncio.run(run_interactive_flow())
+        return
+    if args.cmd == "interactive":
         asyncio.run(run_interactive_flow())
         return
     args.func(args)

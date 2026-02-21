@@ -22,6 +22,7 @@ class NodeConfig:
 class Circle:
     circle_id: str
     secret_hex: str  # shared secret in hex
+    name: str = ""   # optional friendly label
 
 
 @dataclasses.dataclass

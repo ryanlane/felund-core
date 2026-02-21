@@ -21,6 +21,16 @@ from felundchat.models import (
 from felundchat.transport import detect_local_ip
 
 
+def _load_dataclass_strict(cls, payload: dict, label: str):
+    try:
+        return cls(**payload)
+    except TypeError as e:
+        raise ValueError(
+            f"State schema mismatch in {label}: {e}. "
+            f"Delete or reset {STATE_FILE} to start fresh with the current schema."
+        ) from e
+
+
 def ensure_app_dir() -> None:
     APP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -51,13 +61,22 @@ def load_state() -> State:
         return State.default(bind="0.0.0.0", port=9999)
 
     data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    node = NodeConfig(**data["node"])
+    node = _load_dataclass_strict(NodeConfig, data["node"], "node")
 
-    circles = {cid: Circle(**c) for cid, c in data.get("circles", {}).items()}
-    peers = {pid: Peer(**p) for pid, p in data.get("peers", {}).items()}
+    circles = {
+        cid: _load_dataclass_strict(Circle, c, f"circles[{cid}]")
+        for cid, c in data.get("circles", {}).items()
+    }
+    peers = {
+        pid: _load_dataclass_strict(Peer, p, f"peers[{pid}]")
+        for pid, p in data.get("peers", {}).items()
+    }
     circle_members = {cid: set(v) for cid, v in data.get("circle_members", {}).items()}
     channels = {
-        cid: {channel_id: Channel(**channel_data) for channel_id, channel_data in circle_channels.items()}
+        cid: {
+            channel_id: _load_dataclass_strict(Channel, channel_data, f"channels[{cid}][{channel_id}]")
+            for channel_id, channel_data in circle_channels.items()
+        }
         for cid, circle_channels in data.get("channels", {}).items()
     }
     channel_members = {
@@ -73,7 +92,7 @@ def load_state() -> State:
     for mid, m in data.get("messages", {}).items():
         if "channel_id" not in m:
             m["channel_id"] = "general"
-        messages[mid] = ChatMessage(**m)
+        messages[mid] = _load_dataclass_strict(ChatMessage, m, f"messages[{mid}]")
 
     state = State(
         node=node,

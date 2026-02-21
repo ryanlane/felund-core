@@ -164,3 +164,62 @@ def apply_channel_event(state: State, circle_id: str, event: Dict[str, Any]) -> 
         if target_node_id:
             requests_map[channel_id].discard(target_node_id)
             members_map[channel_id].add(target_node_id)
+
+
+# ---------------------------------------------------------------------------
+# Circle name events (CIRCLE_NAME_EVT) — gossip a human-friendly circle alias
+# ---------------------------------------------------------------------------
+
+def make_circle_name_message(state: State, circle_id: str, name: str) -> Optional[ChatMessage]:
+    """Build a CIRCLE_NAME_EVT control message to gossip a friendly circle name."""
+    circle = state.circles.get(circle_id)
+    if not circle:
+        return None
+    created = now_ts()
+    msg_id = sha256_hex(
+        f"{state.node.node_id}|{created}|{secrets.token_hex(8)}".encode("utf-8")
+    )[:32]
+    event = {"t": "CIRCLE_NAME_EVT", "circle_id": circle_id, "name": name}
+    text = json.dumps(event, separators=(",", ":"), sort_keys=True)
+    msg = ChatMessage(
+        msg_id=msg_id,
+        circle_id=circle_id,
+        channel_id=CONTROL_CHANNEL_ID,
+        author_node_id=state.node.node_id,
+        display_name=state.node.display_name,
+        created_ts=created,
+        text=text,
+    )
+    msg.mac = make_message_mac(circle.secret_hex, msg)
+    return msg
+
+
+def parse_circle_name_event(text: str) -> Optional[Dict[str, Any]]:
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("t") != "CIRCLE_NAME_EVT":
+        return None
+    if not data.get("name") or not data.get("circle_id"):
+        return None
+    return data
+
+
+def apply_circle_name_event(state: State, circle_id: str, event: Dict[str, Any]) -> bool:
+    """Apply a CIRCLE_NAME_EVT. Returns True if the circle name was updated.
+
+    First-to-name-wins: the local name takes precedence over any gossiped one.
+    """
+    circle = state.circles.get(circle_id)
+    if not circle:
+        return False
+    name = str(event.get("name", "")).strip()[:40]
+    if not name:
+        return False
+    if circle.name:  # already named locally — don't overwrite
+        return False
+    circle.name = name
+    return True

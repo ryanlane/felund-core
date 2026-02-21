@@ -542,7 +542,8 @@ class ChatScreen(Screen):
 
     def _fmt(self, m: ChatMessage) -> str:
         ts = time.strftime("%H:%M", time.localtime(m.created_ts))
-        author = markup_escape(m.display_name or m.author_node_id[:8])
+        live_name = self.state.node_display_names.get(m.author_node_id, "")
+        author = markup_escape(live_name or m.display_name or m.author_node_id[:8])
         body = _render_text(m.text)
         is_me = m.author_node_id == self.state.node.node_id
         if is_me:
@@ -635,25 +636,54 @@ class ChatScreen(Screen):
         cmd = parts[0].lower()
 
         if cmd == "/help":
-            C = "bold cyan"   # command colour
-            A = "dim"         # arg colour
-            self._log_raw(f"[bold]─── Commands ───────────────────────────────────────[/bold]")
-            self._log_raw(f"  [{C}]/invite[/{C}]                         Show invite code for active circle")
-            self._log_raw(f"  [{C}]/join[/{C}] [{A}]<code>[/{A}]                    Join a circle from an invite code")
-            self._log_raw(f"  [{C}]/circles[/{C}]                        List all circles")
-            self._log_raw(f"  [{C}]/circle create[/{C}] [{A}][name][/{A}]           Create a new circle (shows invite code)")
-            self._log_raw(f"  [{C}]/circle name[/{C}] [{A}]<label>[/{A}]            Rename the active circle (gossiped to peers)")
-            self._log_raw(f"  [{C}]/circle leave[/{C}]                   Leave and delete the active circle")
-            self._log_raw(f"  [{C}]/channels[/{C}]                       List channels in active circle")
-            self._log_raw(f"  [{C}]/channel create[/{C}] [{A}]<name> [mode][/{A}]  Create a channel (public/key/invite)")
-            self._log_raw(f"  [{C}]/channel join[/{C}] [{A}]<name>[/{A}]            Join a channel")
-            self._log_raw(f"  [{C}]/channel switch[/{C}] [{A}]<name>[/{A}]          Switch to a channel")
-            self._log_raw(f"  [{C}]/channel leave[/{C}] [{A}]<name>[/{A}]           Leave a channel")
-            self._log_raw(f"  [{C}]/who[/{C}] [{A}][channel][/{A}]                  Show members of a channel")
-            self._log_raw(f"  [{C}]/debug[/{C}]                          Toggle gossip debug log")
-            self._log_raw(f"  [{C}]/quit[/{C}]                           Exit")
-            self._log_raw(f"[bold]─── Formatting ─────────────────────────────────────[/bold]")
-            self._log_raw(f"  [bold]**bold**[/bold]   [italic]*italic*[/italic]   [bold bright_black on grey23] `code` [/bold bright_black on grey23]   [strike]~~strike~~[/strike]")
+            C = "bold cyan"
+            A = "dim"
+            topic = parts[1].lstrip("/").lower() if len(parts) > 1 else ""
+            HELP = {
+                "invite":   f"  [{C}]/invite[/{C}]  —  Show invite code for the active circle (also copied to clipboard)",
+                "join":     f"  [{C}]/join[/{C}] [{A}]<code>[/{A}]  —  Join a circle using a felund invite code",
+                "circles":  f"  [{C}]/circles[/{C}]  —  List all circles you belong to",
+                "circle":   "\n".join([
+                    f"  [{C}]/circle create[/{C}] [{A}][name][/{A}]  —  Create a new circle and show its invite code",
+                    f"  [{C}]/circle name[/{C}] [{A}]<label>[/{A}]    —  Set a friendly name for the active circle (gossiped)",
+                    f"  [{C}]/circle leave[/{C}]              —  Leave and locally delete the active circle",
+                ]),
+                "channels": f"  [{C}]/channels[/{C}]  —  List channels in the active circle",
+                "channel":  "\n".join([
+                    f"  [{C}]/channel create[/{C}] [{A}]<name> [public|key|invite][/{A}]  —  Create a channel",
+                    f"  [{C}]/channel join[/{C}] [{A}]<name>[/{A}]      —  Join an existing channel",
+                    f"  [{C}]/channel switch[/{C}] [{A}]<name>[/{A}]    —  Switch to a channel",
+                    f"  [{C}]/channel leave[/{C}] [{A}]<name>[/{A}]     —  Leave a channel",
+                    f"  [{C}]/channel requests[/{C}] [{A}]<name>[/{A}]  —  Show pending access requests (owner only)",
+                    f"  [{C}]/channel approve[/{C}] [{A}]<name> <node_id>[/{A}]  —  Approve a request (owner only)",
+                ]),
+                "who":      f"  [{C}]/who[/{C}] [{A}][channel][/{A}]  —  Show members of the active (or named) channel",
+                "name":     f"  [{C}]/name[/{C}]           —  Show your current display name\n  [{C}]/name[/{C}] [{A}]<new_name>[/{A}]  —  Update display name and sync to peers",
+                "debug":    f"  [{C}]/debug[/{C}]  —  Toggle gossip debug log",
+                "quit":     f"  [{C}]/quit[/{C}]   —  Exit felundchat",
+            }
+            if topic and topic in HELP:
+                self._log_raw(HELP[topic])
+            else:
+                self._log_raw("[bold]─── Commands ───────────────────────────────────────[/bold]")
+                self._log_raw(f"  [{C}]/invite[/{C}]                              Show invite code for active circle")
+                self._log_raw(f"  [{C}]/join[/{C}] [{A}]<code>[/{A}]                         Join a circle from an invite code")
+                self._log_raw(f"  [{C}]/circles[/{C}]                             List all circles")
+                self._log_raw(f"  [{C}]/circle create[/{C}] [{A}][name][/{A}]              Create a new circle")
+                self._log_raw(f"  [{C}]/circle name[/{C}] [{A}]<label>[/{A}]               Rename active circle (gossiped)")
+                self._log_raw(f"  [{C}]/circle leave[/{C}]                        Leave active circle")
+                self._log_raw(f"  [{C}]/channels[/{C}]                            List channels in active circle")
+                self._log_raw(f"  [{C}]/channel create[/{C}] [{A}]<name> [mode][/{A}]       Create a channel (public/key/invite)")
+                self._log_raw(f"  [{C}]/channel join|switch|leave[/{C}] [{A}]<name>[/{A}]   Manage channel membership")
+                self._log_raw(f"  [{C}]/channel requests[/{C}] [{A}]<name>[/{A}]            Pending requests (owner only)")
+                self._log_raw(f"  [{C}]/channel approve[/{C}] [{A}]<name> <node_id>[/{A}]   Approve a request (owner only)")
+                self._log_raw(f"  [{C}]/who[/{C}] [{A}][channel][/{A}]                      Show channel members")
+                self._log_raw(f"  [{C}]/name[/{C}] [{A}][new_name][/{A}]                    Show or update your display name")
+                self._log_raw(f"  [{C}]/debug[/{C}]                               Toggle gossip debug log")
+                self._log_raw(f"  [{C}]/quit[/{C}]                                Exit")
+                self._log_raw("[dim]Tip: /help <command> for details  e.g. /help channel[/dim]")
+                self._log_raw("[bold]─── Formatting ─────────────────────────────────────[/bold]")
+                self._log_raw("  [bold]**bold**[/bold]   [italic]*italic*[/italic]   [bold bright_black on grey23] `code` [/bold bright_black on grey23]   [strike]~~strike~~[/strike]")
 
         elif cmd == "/quit":
             await self.app.action_quit()
@@ -719,8 +749,39 @@ class ChatScreen(Screen):
             self._log_system(f"#{target} — {len(members)} member(s):")
             for nid in members:
                 p = self.state.peers.get(nid)
-                tag = "(you)" if nid == self.state.node.node_id else (f"@ {p.addr}" if p else "")
-                self._log_system(f"  {nid[:8]} {tag}")
+                display = self.state.node_display_names.get(nid, nid[:8])
+                if nid == self.state.node.node_id:
+                    tag = "(you)"
+                elif p:
+                    tag = f"@ {p.addr}"
+                else:
+                    tag = ""
+                self._log_system(f"  {display} [{nid[:8]}] {tag}")
+
+        elif cmd == "/name":
+            if len(parts) == 1:
+                self._log_system(f"Your display name: {self.state.node.display_name}")
+                return
+            new_name = " ".join(parts[1:]).strip()[:40]
+            if not new_name:
+                self._log_system("Name cannot be empty.")
+                return
+            self.state.node.display_name = new_name
+            self.state.node_display_names[self.state.node.node_id] = new_name
+            async with self.node._lock:
+                save_state(self.state)
+            for cid in list(self.state.circles.keys()):
+                event = {
+                    "t": "CHANNEL_EVT", "op": "rename",
+                    "node_id": self.state.node.node_id,
+                    "display_name": new_name,
+                }
+                msg = make_channel_event_message(self.state, cid, event)
+                if msg:
+                    self.state.messages[msg.msg_id] = msg
+                    self._seen.add(msg.msg_id)
+            self._log_system(f"Display name updated to '{new_name}'. Syncing to peers...")
+            asyncio.create_task(self._sync_once())
 
         elif cmd == "/debug":
             if self.node:
@@ -915,8 +976,65 @@ class ChatScreen(Screen):
             self._refresh_sidebar()
             self._log_system(f"Left #{ch_id}.")
 
+        elif sub == "requests":
+            if len(args) < 2:
+                self._log_system("Usage: /channel requests <name>")
+                return
+            ch_id = args[1].lower()
+            if ch_id not in channels:
+                self._log_system(f"Unknown channel #{ch_id}.")
+                return
+            channel = channels[ch_id]
+            if channel.created_by != self.state.node.node_id:
+                self._log_system("Only the channel owner can view pending requests.")
+                return
+            reqs = sorted(requests_map.get(ch_id, set()))
+            if not reqs:
+                self._log_system(f"#{ch_id} — no pending requests.")
+            else:
+                self._log_system(f"#{ch_id} — {len(reqs)} pending request(s):")
+                for nid in reqs:
+                    display = self.state.node_display_names.get(nid, nid[:8])
+                    self._log_system(f"  {display} [{nid[:8]}]")
+
+        elif sub == "approve":
+            if len(args) < 3:
+                self._log_system("Usage: /channel approve <name> <node_id>")
+                return
+            ch_id = args[1].lower()
+            prefix = args[2]
+            if ch_id not in channels:
+                self._log_system(f"Unknown channel #{ch_id}.")
+                return
+            channel = channels[ch_id]
+            if channel.created_by != self.state.node.node_id:
+                self._log_system("Only the channel owner can approve requests.")
+                return
+            full_id = next(
+                (nid for nid in requests_map.get(ch_id, set()) if nid.startswith(prefix)),
+                None,
+            )
+            if not full_id:
+                self._log_system(f"No pending request matching '{prefix}' in #{ch_id}.")
+                return
+            event = {
+                "t": "CHANNEL_EVT", "op": "approve",
+                "circle_id": self._current_circle_id, "channel_id": ch_id,
+                "actor_node_id": self.state.node.node_id,
+                "target_node_id": full_id,
+            }
+            apply_channel_event(self.state, self._current_circle_id, event)
+            msg = make_channel_event_message(self.state, self._current_circle_id, event)
+            if msg:
+                self.state.messages[msg.msg_id] = msg
+                self._seen.add(msg.msg_id)
+            async with self.node._lock:
+                save_state(self.state)
+            display = self.state.node_display_names.get(full_id, full_id[:8])
+            self._log_system(f"Approved {display} [{full_id[:8]}] to join #{ch_id}.")
+
         else:
-            self._log_system("Usage: /channel create|join|switch|leave <name>")
+            self._log_system("Usage: /channel create|join|switch|leave|requests|approve <name>")
 
     # ── Sidebar interaction ───────────────────────────────────────────────────
 
