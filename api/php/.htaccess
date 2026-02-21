@@ -8,15 +8,16 @@ RewriteEngine On
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteRule ^(.*)$ rendezvous.php [QSA,L]
 
-# Deny direct HTTP access to the SQLite database
-<Files "*.sqlite">
-    Order deny,allow
-    Deny from all
-</Files>
-
-# Deny access to the data directory
-<IfModule mod_authz_core.c>
-    <DirectoryMatch "data/">
+# Deny direct HTTP access to the SQLite database file
+<FilesMatch "\.(sqlite|sqlite3|db)$">
+    <IfModule mod_authz_core.c>
         Require all denied
-    </DirectoryMatch>
-</IfModule>
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order deny,allow
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# Prevent directory listing
+Options -Indexes

@@ -321,8 +321,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 $method = $_SERVER['REQUEST_METHOD'];
 $path   = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
-// Normalise: strip /v1 prefix and trailing slash
-$path   = '/' . ltrim(preg_replace('#^/v1#', '', rtrim($path ?? '/', '/')), '/');
+// Normalise: strip everything up to and including /v1, then trailing slash
+// Works whether the file lives at the root or under a subdirectory (e.g. /api)
+$path   = '/' . ltrim(preg_replace('#^.*/v1#', '', rtrim($path ?? '/', '/')), '/');
 
 match (true) {
     $method === 'GET'    && $path === '/health'   => route_health(),
