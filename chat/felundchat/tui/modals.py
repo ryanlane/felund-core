@@ -7,7 +7,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label
+from textual.widgets import Button, Input, Label, RichLog
 
 from ._utils import _try_copy_to_clipboard
 
@@ -72,4 +72,62 @@ class InviteModal(ModalScreen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-invite-close":
+            self.dismiss()
+
+
+class HelpModal(ModalScreen):
+    """Scrollable overlay displaying slash-command reference."""
+
+    BINDINGS = [Binding("escape", "dismiss", "Close")]
+
+    DEFAULT_CSS = """
+    HelpModal {
+        align: center middle;
+    }
+    #help-box {
+        width: 88;
+        height: 80vh;
+        max-height: 38;
+        border: solid $primary;
+        background: $surface;
+        padding: 1 0 0 0;
+    }
+    #help-title {
+        text-style: bold;
+        padding: 0 2;
+        height: 2;
+        color: $text;
+        background: $primary-darken-2;
+    }
+    #help-log {
+        height: 1fr;
+        padding: 0 1;
+    }
+    #btn-help-close {
+        width: 100%;
+        height: 3;
+        margin-top: 0;
+    }
+    """
+
+    def __init__(self, lines: list, title: str = "felundchat — commands", **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._lines = lines
+        self._title = title
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="help-box"):
+            yield Label(self._title, id="help-title")
+            yield RichLog(id="help-log", markup=True, highlight=False, auto_scroll=False)
+            yield Button("Close  [dim](Esc)[/dim]", id="btn-help-close", variant="primary")
+
+    async def on_mount(self) -> None:
+        log = self.query_one("#help-log", RichLog)
+        for line in self._lines:
+            log.write(line)
+        log.scroll_home(animate=False)
+        self.query_one("#btn-help-close", Button).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-help-close":
             self.dismiss()

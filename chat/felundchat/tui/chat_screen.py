@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import secrets
 import time
-from typing import List, Optional, Set
+from typing import Callable, List, Optional, Set
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -40,6 +41,45 @@ from .commands import CommandsMixin
 from .modals import InviteModal
 
 from rich.markup import escape as markup_escape
+from textual.suggester import Suggester
+
+
+# ---------------------------------------------------------------------------
+# @mention auto-completer
+# ---------------------------------------------------------------------------
+
+_MENTION_TAIL_RE = re.compile(r"@([\w\-]*)$")
+
+
+class MentionSuggester(Suggester):
+    """Inline ghost-text completer for @name mentions.
+
+    Activates when the cursor sits right after ``@<partial>`` (≥ 2 chars typed).
+    Accepts with Tab or Right-arrow at end of line; leaves the rest of the
+    message untouched.
+    """
+
+    def __init__(self, names_fn) -> None:
+        # use_cache=False so the name list is re-read on every keystroke.
+        super().__init__(use_cache=False, case_sensitive=False)
+        self._names_fn = names_fn
+
+    async def get_suggestion(self, value: str) -> str | None:
+        m = _MENTION_TAIL_RE.search(value)
+        if not m:
+            return None
+        partial = m.group(1)
+        if len(partial) < 2:          # wait for 2+ chars before suggesting
+            return None
+        partial_lower = partial.lower()
+        candidates = sorted(
+            n for n in self._names_fn()
+            if n and n.lower().startswith(partial_lower)
+        )
+        if not candidates:
+            return None
+        # Return the full message with the @partial replaced by @best_match + space.
+        return value[: m.start()] + "@" + candidates[0] + " "
 
 
 class ChatScreen(CommandsMixin, Screen):
@@ -48,6 +88,7 @@ class ChatScreen(CommandsMixin, Screen):
     BINDINGS = [
         Binding("ctrl+q", "app.quit", "Quit"),
         Binding("ctrl+i", "show_invite", "Invite code"),
+        Binding("f1", "show_help", "Help"),
         Binding("escape", "focus_input", "Focus input"),
     ]
 
@@ -101,7 +142,16 @@ class ChatScreen(CommandsMixin, Screen):
         with Horizontal(id="chat-body"):
             yield Tree("Circles", id="circle-tree")
             yield RichLog(id="message-log", markup=True, auto_scroll=True, highlight=False)
-        yield Input(placeholder="Type a message... (/help for commands)", id="message-input")
+        yield Input(
+            placeholder="Type a message... (/help for commands)",
+            id="message-input",
+            suggester=MentionSuggester(
+                lambda: [
+                    name for name in self.state.node_display_names.values()
+                    if name and name.lower() != "anon"
+                ]
+            ),
+        )
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -369,6 +419,9 @@ class ChatScreen(CommandsMixin, Screen):
 
     async def action_show_invite(self) -> None:
         await self._handle_command("/invite")
+
+    async def action_show_help(self) -> None:
+        await self._handle_command("/help")
 
     def action_focus_input(self) -> None:
         self.query_one("#message-input", Input).focus()

@@ -23,7 +23,100 @@ from felundchat.persistence import save_state
 from felundchat.transport import public_addr_hint
 
 from ._utils import mentions_me, _render_text_with_mentions
-from .modals import InviteModal
+from .modals import HelpModal, InviteModal
+
+
+# ---------------------------------------------------------------------------
+# Help content
+# ---------------------------------------------------------------------------
+
+def _help_lines(topic: str = "") -> list:
+    """Return Rich-markup lines for the help modal.
+
+    Pass an empty string (or no argument) for the full command reference.
+    Pass a command name (e.g. ``"channel"``) for focused help on that group.
+    """
+    FULL = [
+        "[bold]felundchat — slash commands[/bold]",
+        "",
+        "[bold cyan]General[/bold cyan]",
+        "  [bold]/help[/bold] [dim][topic][/dim]           This screen; /help channel for channel docs",
+        "  [bold]/quit[/bold]                   Exit felundchat",
+        "  [bold]/debug[/bold]                  Toggle gossip-sync debug log",
+        "",
+        "[bold cyan]Identity[/bold cyan]",
+        "  [bold]/name[/bold]                   Show your current display name",
+        "  [bold]/name[/bold] [dim]<new name>[/dim]        Change your display name (gossiped to peers)",
+        "",
+        "[bold cyan]Circles[/bold cyan]",
+        "  [bold]/circles[/bold]                List all circles you are in",
+        "  [bold]/circle create[/bold] [dim][name][/dim]   Create a new circle (shows invite code)",
+        "  [bold]/circle name[/bold] [dim]<label>[/dim]    Rename the active circle",
+        "  [bold]/circle leave[/bold]            Leave the active circle",
+        "  [bold]/invite[/bold]                  Show/copy invite code for the active circle",
+        "  [bold]/join[/bold] [dim]<code>[/dim]            Join a circle using an invite code",
+        "",
+        "[bold cyan]Channels[/bold cyan]",
+        "  [bold]/channels[/bold]               List channels in the active circle",
+        "  [bold]/channel create[/bold] [dim]<name>[/dim] [dim][public|key|invite][/dim]",
+        "                          Create a channel (default access: public)",
+        "  [bold]/channel switch[/bold] [dim]<name>[/dim]  Switch to another channel",
+        "  [bold]/channel join[/bold] [dim]<name>[/dim]    Join a channel",
+        "  [bold]/channel leave[/bold] [dim]<name>[/dim]   Leave a channel",
+        "  [bold]/channel requests[/bold] [dim]<name>[/dim]",
+        "                          View pending join requests (owner only)",
+        "  [bold]/channel approve[/bold] [dim]<name> <node_id>[/dim]",
+        "                          Approve a join request (owner only)",
+        "",
+        "[bold cyan]People & Messages[/bold cyan]",
+        "  [bold]/who[/bold] [dim][channel][/dim]           Show members of a channel",
+        "  [bold]/inbox[/bold] [dim][--mentions|-m] [N][/dim]",
+        "                          Recent messages (across all circles/channels).",
+        "                          --mentions / -m  →  only show @mentions of you.",
+        "                          N                →  how many to show (default 20).",
+        "",
+        "[bold cyan]Keyboard shortcuts[/bold cyan]",
+        "  [bold]Ctrl+I[/bold]     Show invite code modal",
+        "  [bold]F1[/bold]         Open this help screen",
+        "  [bold]Ctrl+Q[/bold]     Quit",
+        "  [bold]Escape[/bold]     Focus the message input",
+        "  [bold]Tab[/bold]        Accept @mention autocomplete suggestion",
+        "",
+        "[dim]Tip: @mention a peer by typing @ and at least 2 characters — Tab to complete.[/dim]",
+    ]
+
+    CHANNEL_HELP = [
+        "[bold]Channel commands[/bold]",
+        "",
+        "  [bold]/channel create[/bold] [dim]<name> [public|key|invite][/dim]",
+        "      Create a channel.  Access modes:",
+        "        [bold]public[/bold]  — anyone in the circle can join automatically",
+        "        [bold]key[/bold]     — requires a shared passphrase (not yet enforced)",
+        "        [bold]invite[/bold]  — owner must approve each join request",
+        "",
+        "  [bold]/channel switch[/bold] [dim]<name>[/dim]",
+        "      Switch the active channel (also clickable in the sidebar).",
+        "",
+        "  [bold]/channel join[/bold] [dim]<name>[/dim]",
+        "      Join a channel and start receiving its messages.",
+        "",
+        "  [bold]/channel leave[/bold] [dim]<name>[/dim]",
+        "      Leave a channel (you cannot leave #general).",
+        "",
+        "  [bold]/channel requests[/bold] [dim]<name>[/dim]",
+        "      List users waiting to join an invite-only channel.",
+        "      Only available to the channel owner.",
+        "",
+        "  [bold]/channel approve[/bold] [dim]<name> <node_id_prefix>[/dim]",
+        "      Approve a pending join request.  You only need the first few",
+        "      characters of the node ID shown by /channel requests.",
+    ]
+
+    topic = (topic or "").strip().lstrip("/").lower()
+
+    if topic in ("channel", "channels"):
+        return CHANNEL_HELP
+    return FULL
 
 
 class CommandsMixin:
@@ -109,67 +202,10 @@ class CommandsMixin:
     # ── Individual command implementations ────────────────────────────────────
 
     async def _cmd_help(self, parts: list) -> None:
-        C = "bold cyan"
-        A = "dim"
         topic = parts[1].lstrip("/").lower() if len(parts) > 1 else ""
-        HELP = {
-            "invite":   f"  [{C}]/invite[/{C}]  —  Show invite code for the active circle (copied to clipboard)",
-            "join":     f"  [{C}]/join[/{C}] [{A}]<code>[/{A}]  —  Join a circle using a felund invite code",
-            "circles":  f"  [{C}]/circles[/{C}]  —  List all circles you belong to",
-            "circle":   "\n".join([
-                f"  [{C}]/circle create[/{C}] [{A}][name][/{A}]  —  Create a new circle and show its invite code",
-                f"  [{C}]/circle name[/{C}] [{A}]<label>[/{A}]    —  Set a friendly name for the active circle (gossiped)",
-                f"  [{C}]/circle leave[/{C}]              —  Leave and locally delete the active circle",
-            ]),
-            "channels": f"  [{C}]/channels[/{C}]  —  List channels in the active circle",
-            "channel":  "\n".join([
-                f"  [{C}]/channel create[/{C}] [{A}]<name> [public|key|invite][/{A}]  —  Create a channel",
-                f"  [{C}]/channel join[/{C}] [{A}]<name>[/{A}]      —  Join an existing channel",
-                f"  [{C}]/channel switch[/{C}] [{A}]<name>[/{A}]    —  Switch to a channel",
-                f"  [{C}]/channel leave[/{C}] [{A}]<name>[/{A}]     —  Leave a channel",
-                f"  [{C}]/channel requests[/{C}] [{A}]<name>[/{A}]  —  Show pending access requests (owner only)",
-                f"  [{C}]/channel approve[/{C}] [{A}]<name> <node_id>[/{A}]  —  Approve a request (owner only)",
-            ]),
-            "who":   f"  [{C}]/who[/{C}] [{A}][channel][/{A}]  —  Show members of the active (or named) channel",
-            "inbox": (
-                f"  [{C}]/inbox[/{C}] [{A}][--mentions] [N][/{A}]  —  Show last N messages across all circles\n"
-                f"  [{C}]/inbox --mentions[/{C}]              —  Show only messages that @mention you"
-            ),
-            "name":  (
-                f"  [{C}]/name[/{C}]           —  Show your current display name\n"
-                f"  [{C}]/name[/{C}] [{A}]<new_name>[/{A}]  —  Update display name and sync to peers"
-            ),
-            "debug": f"  [{C}]/debug[/{C}]  —  Toggle gossip debug log",
-            "quit":  f"  [{C}]/quit[/{C}]   —  Exit felundchat",
-        }
-        if topic and topic in HELP:
-            self._log_raw(HELP[topic])
-            return
-
-        self._log_raw("[bold]─── Commands ───────────────────────────────────────[/bold]")
-        self._log_raw(f"  [{C}]/invite[/{C}]                              Show invite code for active circle")
-        self._log_raw(f"  [{C}]/join[/{C}] [{A}]<code>[/{A}]                         Join a circle from an invite code")
-        self._log_raw(f"  [{C}]/circles[/{C}]                             List all circles")
-        self._log_raw(f"  [{C}]/circle create[/{C}] [{A}][name][/{A}]              Create a new circle")
-        self._log_raw(f"  [{C}]/circle name[/{C}] [{A}]<label>[/{A}]               Rename active circle (gossiped)")
-        self._log_raw(f"  [{C}]/circle leave[/{C}]                        Leave active circle")
-        self._log_raw(f"  [{C}]/channels[/{C}]                            List channels in active circle")
-        self._log_raw(f"  [{C}]/channel create[/{C}] [{A}]<name> [mode][/{A}]       Create a channel (public/key/invite)")
-        self._log_raw(f"  [{C}]/channel join|switch|leave[/{C}] [{A}]<name>[/{A}]   Manage channel membership")
-        self._log_raw(f"  [{C}]/channel requests[/{C}] [{A}]<name>[/{A}]            Pending requests (owner only)")
-        self._log_raw(f"  [{C}]/channel approve[/{C}] [{A}]<name> <node_id>[/{A}]   Approve a request (owner only)")
-        self._log_raw(f"  [{C}]/who[/{C}] [{A}][channel][/{A}]                      Show channel members")
-        self._log_raw(f"  [{C}]/inbox[/{C}] [{A}][--mentions] [N][/{A}]             Recent messages (or your @mentions)")
-        self._log_raw(f"  [{C}]/name[/{C}] [{A}][new_name][/{A}]                    Show or update your display name")
-        self._log_raw(f"  [{C}]/debug[/{C}]                               Toggle gossip debug log")
-        self._log_raw(f"  [{C}]/quit[/{C}]                                Exit")
-        self._log_raw("[dim]Tip: /help <command> for details  e.g. /help channel[/dim]")
-        self._log_raw("[bold]─── Formatting ─────────────────────────────────────[/bold]")
-        self._log_raw(
-            "  [bold]**bold**[/bold]   [italic]*italic*[/italic]"
-            "   [bold bright_black on grey23] `code` [/bold bright_black on grey23]"
-            "   [strike]~~strike~~[/strike]"
-        )
+        lines = _help_lines(topic)
+        title = f"felundchat — /help {topic}" if topic else "felundchat — commands"
+        await self.app.push_screen(HelpModal(lines, title=title))
 
     async def _cmd_join(self, parts: list) -> None:
         if len(parts) < 2:
