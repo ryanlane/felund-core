@@ -78,6 +78,22 @@ def _try_copy_to_clipboard(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Per-peer color palette
+# ---------------------------------------------------------------------------
+
+_PEER_COLORS = [
+    "cyan", "yellow", "magenta", "bright_cyan",
+    "bright_yellow", "bright_magenta", "orange1", "hot_pink",
+    "chartreuse3", "cornflower_blue", "salmon1", "sky_blue2",
+]
+
+
+def _peer_color(node_id: str) -> str:
+    """Return a deterministic Rich color name for a given node ID."""
+    return _PEER_COLORS[hash(node_id) % len(_PEER_COLORS)]
+
+
+# ---------------------------------------------------------------------------
 # Inline Markdown → Rich markup renderer
 # ---------------------------------------------------------------------------
 
@@ -548,7 +564,8 @@ class ChatScreen(Screen):
         is_me = m.author_node_id == self.state.node.node_id
         if is_me:
             return f"[dim]{ts}[/dim] [bold green]{author}[/bold green]: {body}"
-        return f"[dim]{ts}[/dim] [bold]{author}[/bold]: {body}"
+        color = _peer_color(m.author_node_id)
+        return f"[dim]{ts}[/dim] [bold {color}]{author}[/bold {color}]: {body}"
 
     def _log_system(self, msg: str) -> None:
         self.query_one("#message-log", RichLog).write(f"[dim italic]  {msg}[/dim italic]")
