@@ -76,6 +76,7 @@ Type these in the input bar:
 | Command | Action |
 |---------|--------|
 | `/help` | List all commands |
+| `/help <command>` | Show detailed help for one command |
 | `/invite` | Show invite code for the active circle |
 | `/join <code>` | Join a new circle via felund code |
 | `/circles` | List joined circles |
@@ -84,7 +85,11 @@ Type these in the input bar:
 | `/channel join <name> [key]` | Join a channel |
 | `/channel switch <name>` | Switch active channel |
 | `/channel leave <name>` | Leave a channel |
+| `/channel requests <name>` | Show pending access requests (owner only) |
+| `/channel approve <name> <node_id>` | Approve a pending request (owner only) |
 | `/who [channel]` | Show members in the active (or named) channel |
+| `/name` | Show your current display name |
+| `/name <new_name>` | Update display name and sync to peers |
 | `/debug` | Toggle gossip debug log |
 | `/quit` | Exit |
 

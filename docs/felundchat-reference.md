@@ -11,7 +11,7 @@ This document captures the current chat implementation details and operational n
 ## Current Architecture
 
 - `chat/felundchat/models.py`
-  - Core dataclasses (`State`, `NodeConfig`, `Circle`, `Peer`, `ChatMessage`)
+  - Core dataclasses (`State`, `NodeConfig`, `Circle`, `Peer`, `Channel`, `ChatMessage`)
 - `chat/felundchat/persistence.py`
   - Load/save state (`~/.felundchat/state.json`)
   - Message pruning (age + per-circle cap)
@@ -23,6 +23,8 @@ This document captures the current chat implementation details and operational n
   - Server, sync protocol, peer/message merge, gossip loop
 - `chat/felundchat/chat.py`
   - Interactive host/client flow and CLI chat UX
+- `chat/felundchat/channel_sync.py`
+  - Signed channel control events (create/join/request/approve/leave/rename)
 - `chat/felundchat/cli.py`
   - Command parser and command handlers
 
@@ -40,6 +42,7 @@ This document captures the current chat implementation details and operational n
   - `MSGS_SEND`
 - Per-message MAC is required before merge.
 - Cross-circle injection is blocked (`m.circle_id` must match active sync circle).
+- Channel control events are gossiped on a reserved control channel and applied by all peers.
 
 ## Interactive UX (Current)
 
@@ -52,7 +55,19 @@ Running `python chat/felundchat.py` launches guided interactive mode.
 - Client mode:
   - Accepts `felund code` (or legacy secret + peer)
 - Chat commands:
-  - `/circles`, `/switch`, `/inbox`, `/debug`, `/quit`
+  - `/help`, `/help <command>`
+  - `/circles`, `/switch`
+  - `/channels`
+  - `/channel create|join|switch|leave|requests|approve ...`
+  - `/who [channel]`
+  - `/name`, `/name <new_name>`
+  - `/inbox`, `/debug`, `/quit`
+
+Display names:
+
+- Display names are persisted locally.
+- `/name <new_name>` emits a signed control event and updates peers.
+- Rendering prefers latest known name per node when available.
 
 ## Debug Logging
 
