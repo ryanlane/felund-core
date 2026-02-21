@@ -219,6 +219,8 @@ class GossipNode:
                 continue
             if m.msg_id not in self.state.messages:
                 self.state.messages[m.msg_id] = m
+                if m.display_name:
+                    self.state.node_display_names[m.author_node_id] = m.display_name[:40]
                 if m.channel_id == CONTROL_CHANNEL_ID:
                     event = parse_channel_event(m.text)
                     if event:

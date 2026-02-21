@@ -37,6 +37,7 @@ HELP_SUMMARY = {
     "channel": "Manage channels (create/join/leave/switch/requests/approve)",
     "who": "Show members in a channel",
     "inbox": "Show recent messages in active channel",
+    "name": "Show or change your display name",
     "debug": "Toggle local sync debug logs",
     "quit": "Exit chat",
 }
@@ -67,6 +68,10 @@ HELP_DETAILS = {
     "who": [
         "/who",
         "/who <channel>",
+    ],
+    "name": [
+        "/name",
+        "/name <new_display_name>",
     ],
     "inbox": [
         "/inbox",
@@ -165,9 +170,11 @@ def append_channel_event(state: State, circle_id: str, event: dict) -> None:
         state.messages[msg.msg_id] = msg
 
 
-def render_message(m: ChatMessage) -> str:
+def render_message(m: ChatMessage, state: Optional[State] = None) -> str:
     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.created_ts))
     author = m.display_name or m.author_node_id[:8]
+    if state is not None:
+        author = state.node_display_names.get(m.author_node_id, author)
     return f"[{ts}] #{m.channel_id} {author}: {m.text}"
 
 
@@ -225,16 +232,18 @@ async def interactive_chat(
     selected_circle_id: Optional[str],
     bootstrap_peer: Optional[str] = None,
 ) -> None:
-    circle_id = choose_circle_id(state, selected_circle_id)
-    if not circle_id:
+    chosen_circle_id = choose_circle_id(state, selected_circle_id)
+    if not chosen_circle_id:
         print("No circles available.")
         return
+    circle_id: str = chosen_circle_id
     ensure_default_channel(state, circle_id)
     current_channel = "general"
 
     seen: Set[str] = set()
 
     def prompt_text() -> str:
+        assert circle_id is not None
         return f"[{circle_id[:8]} #{current_channel}] > "
 
     def redraw_prompt() -> None:
@@ -255,18 +264,19 @@ async def interactive_chat(
                 if m.channel_id == CONTROL_CHANNEL_ID:
                     event = parse_channel_event(m.text)
                     if event:
+                        assert circle_id is not None
                         async with node._lock:
                             apply_channel_event(state, circle_id, event)
                             save_state(state)
                     continue
                 sys.stdout.write("\r")
-                print(render_message(m))
+                print(render_message(m, state))
                 redraw_prompt()
             await asyncio.sleep(1)
 
     watcher = asyncio.create_task(watch_incoming())
     print("Chat ready. Type messages and press Enter.")
-    print("Commands: /help, /switch, /circles, /channels, /channel ..., /who, /inbox, /debug, /quit")
+    print("Commands: /help, /switch, /circles, /channels, /channel ..., /who, /name, /inbox, /debug, /quit")
 
     try:
         while True:
@@ -298,6 +308,48 @@ async def interactive_chat(
                 parts = text.split(maxsplit=1)
                 print_help(parts[1] if len(parts) > 1 else None)
                 continue
+            if text.startswith("/name"):
+                parts = text.split(maxsplit=1)
+                if len(parts) == 1:
+                    print(f"Current display name: {state.node.display_name}")
+                    continue
+                new_name = parts[1].strip()
+                if not new_name:
+                    print("Display name cannot be empty.")
+                    continue
+                if len(new_name) > 40:
+                    print("Display name must be 40 characters or fewer.")
+                    continue
+
+                state.node.display_name = new_name
+                state.node_display_names[state.node.node_id] = new_name
+
+                for cid in list(state.circles.keys()):
+                    append_channel_event(
+                        state,
+                        cid,
+                        {
+                            "t": "CHANNEL_EVT",
+                            "op": "rename",
+                            "circle_id": cid,
+                            "node_id": state.node.node_id,
+                            "display_name": new_name,
+                            "actor_node_id": state.node.node_id,
+                            "created_ts": now_ts(),
+                        },
+                    )
+
+                async with node._lock:
+                    save_state(state)
+
+                await sync_circle_once(
+                    node,
+                    state,
+                    circle_id,
+                    extra_peers=[bootstrap_peer] if bootstrap_peer else None,
+                )
+                print(f"Display name updated to: {new_name}")
+                continue
             if text.startswith("/who"):
                 parts = text.split(maxsplit=1)
                 target_channel = current_channel
@@ -325,12 +377,14 @@ async def interactive_chat(
                     print(f"#{target_channel} members ({len(members)}):")
                     for node_id in members:
                         peer = state.peers.get(node_id)
+                        display_name = state.node_display_names.get(node_id, "")
+                        name_part = f" ({display_name})" if display_name else ""
                         if node_id == state.node.node_id:
-                            print(f" - {node_id} (you)")
+                            print(f" - {node_id}{name_part} (you)")
                         elif peer:
-                            print(f" - {node_id} @ {peer.addr}")
+                            print(f" - {node_id}{name_part} @ {peer.addr}")
                         else:
-                            print(f" - {node_id}")
+                            print(f" - {node_id}{name_part}")
 
                 if channel_meta and channel_meta.created_by == state.node.node_id:
                     pending = sorted(requests_map.get(target_channel, set()))
@@ -599,7 +653,7 @@ async def interactive_chat(
                     ]
                     msgs.sort(key=lambda m: (m.created_ts, m.msg_id))
                 for m in msgs[-20:]:
-                    print(render_message(m))
+                    print(render_message(m, state))
                 continue
             if text == "/debug":
                 node.debug_sync = not node.debug_sync
@@ -630,9 +684,10 @@ async def interactive_chat(
             msg.mac = make_message_mac(circle.secret_hex, msg)
             async with node._lock:
                 state.messages[msg_id] = msg
+                state.node_display_names[state.node.node_id] = state.node.display_name
                 save_state(state)
             seen.add(msg_id)
-            print(render_message(msg))
+            print(render_message(msg, state))
             await sync_circle_once(
                 node, state, circle_id,
                 extra_peers=[bootstrap_peer] if bootstrap_peer else None,
@@ -656,6 +711,7 @@ async def run_interactive_flow() -> None:
     current_name = state.node.display_name or "anon"
     entered_name = input(f"Display name [{current_name}]: ").strip()
     state.node.display_name = entered_name or current_name
+    state.node_display_names[state.node.node_id] = state.node.display_name
 
     local_ip = detect_local_ip()
     state.node.bind = local_ip

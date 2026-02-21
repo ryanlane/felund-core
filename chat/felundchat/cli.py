@@ -139,6 +139,7 @@ def cmd_send(args: argparse.Namespace) -> None:
     )
     msg.mac = make_message_mac(state.circles[cid].secret_hex, msg)
     state.messages[msg_id] = msg
+    state.node_display_names[state.node.node_id] = state.node.display_name
     save_state(state)
     print(f"Queued message {msg_id}. It will gossip out while `run` is active.")
 
@@ -173,7 +174,7 @@ def cmd_inbox(args: argparse.Namespace) -> None:
     msgs = [m for m in state.messages.values() if m.circle_id == cid and m.channel_id == channel_id]
     msgs.sort(key=lambda m: (m.created_ts, m.msg_id))
     for m in msgs[-args.limit:]:
-        print(render_message(m))
+        print(render_message(m, state))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -220,22 +221,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--circle-id", help="Circle id")
     sp.set_defaults(func=cmd_peers)
 
-    sp = sub.add_parser("tui", help="Launch the Textual panel-based TUI (default)")
-    sp.set_defaults(func=cmd_tui)
-
     return p
-
-
-def cmd_tui(args: argparse.Namespace) -> None:
-    from felundchat.tui import FelundApp
-    FelundApp().run()
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    if not getattr(args, "cmd", None) or args.cmd in {"interactive", "tui"}:
-        from felundchat.tui import FelundApp
-        FelundApp().run()
+    if not getattr(args, "cmd", None) or args.cmd == "interactive":
+        asyncio.run(run_interactive_flow())
         return
     args.func(args)

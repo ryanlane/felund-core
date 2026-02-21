@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import secrets
 import time
-from typing import Dict, Optional, Set
+from typing import Dict, Set
 
 
 def now_ts() -> int:
@@ -22,7 +22,6 @@ class NodeConfig:
 class Circle:
     circle_id: str
     secret_hex: str  # shared secret in hex
-    name: str = ""   # local friendly display name (not gossiped)
 
 
 @dataclasses.dataclass
@@ -64,6 +63,7 @@ class State:
     channels: Dict[str, Dict[str, Channel]]  # circle_id -> channel_id -> Channel
     channel_members: Dict[str, Dict[str, Set[str]]]  # circle_id -> channel_id -> member node_ids
     channel_requests: Dict[str, Dict[str, Set[str]]]  # circle_id -> channel_id -> pending node_ids
+    node_display_names: Dict[str, str]  # node_id -> latest display name
 
     @staticmethod
     def default(bind: str, port: int) -> State:
@@ -78,4 +78,5 @@ class State:
             channels={},
             channel_members={},
             channel_requests={},
+            node_display_names={node_id: "anon"},
         )

@@ -1,0 +1,22 @@
+# Felund Rendezvous — Apache configuration
+# Place this file (and rendezvous.php) inside your document root or a subdirectory.
+# Requires: mod_rewrite enabled
+
+RewriteEngine On
+
+# Route all requests (except existing files) through the PHP router
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule ^(.*)$ rendezvous.php [QSA,L]
+
+# Deny direct HTTP access to the SQLite database
+<Files "*.sqlite">
+    Order deny,allow
+    Deny from all
+</Files>
+
+# Deny access to the data directory
+<IfModule mod_authz_core.c>
+    <DirectoryMatch "data/">
+        Require all denied
+    </DirectoryMatch>
+</IfModule>

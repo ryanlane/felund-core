@@ -68,6 +68,7 @@ def load_state() -> State:
         cid: {channel_id: set(requests) for channel_id, requests in circle_map.items()}
         for cid, circle_map in data.get("channel_requests", {}).items()
     }
+    node_display_names = {str(node_id): str(name) for node_id, name in data.get("node_display_names", {}).items()}
     messages = {}
     for mid, m in data.get("messages", {}).items():
         if "channel_id" not in m:
@@ -83,11 +84,13 @@ def load_state() -> State:
         channels=channels,
         channel_members=channel_members,
         channel_requests=channel_requests,
+        node_display_names=node_display_names,
     )
     if not state.node.bind or state.node.bind == "0.0.0.0":
         state.node.bind = detect_local_ip()
     if not state.node.display_name:
         state.node.display_name = "anon"
+    state.node_display_names[state.node.node_id] = state.node.display_name
     prune_messages(state)
     return state
 
@@ -113,6 +116,7 @@ def save_state(state: State) -> None:
             cid: {channel_id: sorted(list(requests)) for channel_id, requests in circle_map.items()}
             for cid, circle_map in state.channel_requests.items()
         },
+        "node_display_names": dict(state.node_display_names),
     }
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
