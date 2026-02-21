@@ -44,8 +44,17 @@ class InviteModal(ModalScreen):
         height: 1;
         margin-bottom: 1;
     }
+    #invite-buttons {
+        layout: horizontal;
+        height: auto;
+        margin-top: 1;
+    }
+    #btn-invite-copy {
+        width: 1fr;
+        margin-right: 1;
+    }
     #btn-invite-close {
-        width: 100%;
+        width: 1fr;
     }
     """
 
@@ -54,24 +63,42 @@ class InviteModal(ModalScreen):
         self._code = code
 
     def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal
         with Vertical(id="invite-box"):
             yield Label("Invite Code", id="invite-modal-title")
             yield Input(value=self._code, id="invite-code-input")
-            yield Label("Ctrl+A  →  Ctrl+C to copy  |  Esc to close", id="invite-hint")
+            yield Label("Esc to close", id="invite-hint")
             yield Label("", id="invite-status")
-            yield Button("Close", id="btn-invite-close", variant="primary")
+            with Horizontal(id="invite-buttons"):
+                yield Button("Copy to Clipboard", id="btn-invite-copy", variant="success")
+                yield Button("Close", id="btn-invite-close", variant="primary")
 
     async def on_mount(self) -> None:
         self.query_one("#invite-code-input", Input).focus()
-        copied = await asyncio.to_thread(_try_copy_to_clipboard, self._code)
+        await self._do_copy()
+
+    async def _do_copy(self) -> None:
         status = self.query_one("#invite-status", Label)
+        # Primary: OSC 52 — built into Textual, works in GNOME Terminal,
+        # Windows Terminal, kitty, iTerm2, and most modern terminal emulators
+        # without any external tools.
+        try:
+            self.app.copy_to_clipboard(self._code)
+            status.update("[green]Copied to clipboard[/green]")
+            return
+        except Exception:
+            pass
+        # Fallback: try system clipboard tools (xclip, wl-copy, clip.exe, …)
+        copied = await asyncio.to_thread(_try_copy_to_clipboard, self._code)
         if copied:
-            status.update("[green]Copied to clipboard automatically[/green]")
+            status.update("[green]Copied to clipboard[/green]")
         else:
             status.update("[dim]Auto-copy unavailable — use Ctrl+A, Ctrl+C above[/dim]")
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-invite-close":
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-invite-copy":
+            await self._do_copy()
+        elif event.button.id == "btn-invite-close":
             self.dismiss()
 
 

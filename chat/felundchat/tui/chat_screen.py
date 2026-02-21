@@ -87,7 +87,7 @@ class ChatScreen(CommandsMixin, Screen):
 
     BINDINGS = [
         Binding("ctrl+q", "app.quit", "Quit"),
-        Binding("ctrl+i", "show_invite", "Invite code"),
+        Binding("f2", "show_invite", "Invite code"),
         Binding("f1", "show_help", "Help"),
         Binding("escape", "focus_input", "Focus input"),
     ]

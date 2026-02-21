@@ -76,7 +76,7 @@ def _help_lines(topic: str = "") -> list:
         "                          N                →  how many to show (default 20).",
         "",
         "[bold cyan]Keyboard shortcuts[/bold cyan]",
-        "  [bold]Ctrl+I[/bold]     Show invite code modal",
+        "  [bold]F2[/bold]         Show invite code modal",
         "  [bold]F1[/bold]         Open this help screen",
         "  [bold]Ctrl+Q[/bold]     Quit",
         "  [bold]Escape[/bold]     Focus the message input",
