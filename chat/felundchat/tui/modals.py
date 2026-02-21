@@ -12,6 +12,109 @@ from textual.widgets import Button, Input, Label, RichLog
 from ._utils import _try_copy_to_clipboard
 
 
+class SettingsModal(ModalScreen):
+    """F3 / /settings — edit display name and rendezvous URL."""
+
+    BINDINGS = [Binding("escape", "dismiss", "Cancel")]
+
+    DEFAULT_CSS = """
+    SettingsModal {
+        align: center middle;
+    }
+    #settings-box {
+        width: 74;
+        height: auto;
+        border: solid $primary;
+        padding: 1 2;
+        background: $surface;
+    }
+    #settings-title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    #settings-label-node {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+    .settings-field-label {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    #settings-status {
+        height: 1;
+        margin-top: 1;
+    }
+    #settings-buttons {
+        layout: horizontal;
+        height: auto;
+        margin-top: 1;
+    }
+    #btn-settings-test   { width: 1fr; margin-right: 1; }
+    #btn-settings-cancel { width: 1fr; margin-right: 1; }
+    #btn-settings-save   { width: 1fr; }
+    """
+
+    def __init__(
+        self,
+        display_name: str,
+        rendezvous_base: str,
+        node_id: str,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._display_name = display_name
+        self._rendezvous_base = rendezvous_base
+        self._node_id = node_id
+
+    def compose(self) -> ComposeResult:
+        from textual.containers import Horizontal
+        with Vertical(id="settings-box"):
+            yield Label("Settings", id="settings-title")
+            yield Label(f"Node ID: {self._node_id}", id="settings-label-node")
+            yield Label("Display name", classes="settings-field-label")
+            yield Input(value=self._display_name, id="input-display-name", placeholder="anon")
+            yield Label("Rendezvous / Relay URL", classes="settings-field-label")
+            yield Input(
+                value=self._rendezvous_base,
+                id="input-rendezvous",
+                placeholder="https://felund.com/api  (leave blank to disable)",
+            )
+            yield Label("", id="settings-status")
+            with Horizontal(id="settings-buttons"):
+                yield Button("Test", id="btn-settings-test")
+                yield Button("Cancel", id="btn-settings-cancel")
+                yield Button("Save", id="btn-settings-save", variant="primary")
+
+    async def on_mount(self) -> None:
+        self.query_one("#input-display-name", Input).focus()
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-settings-save":
+            display_name = self.query_one("#input-display-name", Input).value.strip() or "anon"
+            rendezvous_base = self.query_one("#input-rendezvous", Input).value.strip().rstrip("/")
+            self.dismiss({"display_name": display_name, "rendezvous_base": rendezvous_base})
+        elif event.button.id == "btn-settings-cancel":
+            self.dismiss(None)
+        elif event.button.id == "btn-settings-test":
+            await self._test_connection()
+
+    async def _test_connection(self) -> None:
+        status = self.query_one("#settings-status", Label)
+        url = self.query_one("#input-rendezvous", Input).value.strip().rstrip("/")
+        if not url:
+            status.update("[red]Enter a URL first.[/red]")
+            return
+        status.update("[dim]Testing…[/dim]")
+        try:
+            from felundchat.rendezvous_client import _api_request
+            data = await asyncio.to_thread(_api_request, "GET", f"{url}/v1/health")
+            version = data.get("version", "?")
+            server_time = data.get("time", 0)
+            status.update(f"[green]OK — v{version}  (server time {server_time})[/green]")
+        except Exception as exc:
+            status.update(f"[red]Failed: {exc}[/red]")
+
+
 class InviteModal(ModalScreen):
     """Pop-up showing an invite code in a selectable input field."""
 

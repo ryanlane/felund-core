@@ -47,9 +47,14 @@ function db(): PDO
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
 
-    // WAL mode: concurrent readers don't block the writer
+    // WAL mode: concurrent readers don't block the writer.
+    // busy_timeout: if a write lock is held, wait up to 8 s before giving up
+    // instead of failing immediately with SQLITE_BUSY.  Essential when multiple
+    // PHP workers (or concurrent push requests) write at the same time.
     $pdo->exec('PRAGMA journal_mode=WAL');
     $pdo->exec('PRAGMA synchronous=NORMAL');
+    $pdo->exec('PRAGMA busy_timeout=8000');
+    $pdo->exec('PRAGMA cache_size=-4096');  // 4 MB page cache
 
     $pdo->exec('CREATE TABLE IF NOT EXISTS presence (
         circle_hint  TEXT    NOT NULL,
@@ -66,14 +71,27 @@ function db(): PDO
     // Relay: shared message store for clients that cannot open direct TCP
     // connections (e.g. browsers).  Messages are HMAC-verified by clients;
     // the server stores them opaquely and never inspects the content.
+    //
+    // stored_at = server-side Unix timestamp set at INSERT time.  The
+    // since-cursor used by GET /v1/messages is compared against stored_at
+    // (not created_ts) so that client clock-skew cannot cause messages to
+    // be missed.
     $pdo->exec('CREATE TABLE IF NOT EXISTS relay_messages (
         msg_id      TEXT    NOT NULL PRIMARY KEY,
         circle_hint TEXT    NOT NULL,
         payload     TEXT    NOT NULL,
         created_ts  INTEGER NOT NULL,
+        stored_at   INTEGER NOT NULL DEFAULT 0,
         expires_at  INTEGER NOT NULL
     )');
-    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_rmsg_circle ON relay_messages (circle_hint, created_ts)');
+    // Migration: add stored_at to pre-existing databases.
+    try {
+        $pdo->exec('ALTER TABLE relay_messages ADD COLUMN stored_at INTEGER NOT NULL DEFAULT 0');
+        $pdo->exec('UPDATE relay_messages SET stored_at = created_ts WHERE stored_at = 0');
+    } catch (\PDOException) {
+        // Column already exists — nothing to do.
+    }
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_rmsg_stored ON relay_messages (circle_hint, stored_at)');
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_rmsg_exp    ON relay_messages (expires_at)');
 
     return $pdo;
@@ -339,8 +357,8 @@ function route_messages_post(): never
     db_prune($db, $now);
 
     $stmt    = $db->prepare(
-        'INSERT OR IGNORE INTO relay_messages (msg_id, circle_hint, payload, created_ts, expires_at)
-         VALUES (:mid, :ch, :payload, :ts, :exp)'
+        'INSERT OR IGNORE INTO relay_messages (msg_id, circle_hint, payload, created_ts, stored_at, expires_at)
+         VALUES (:mid, :ch, :payload, :ts, :stored, :exp)'
     );
     $stored = 0;
 
@@ -366,6 +384,7 @@ function route_messages_post(): never
             ':ch'      => $circle_hint,
             ':payload' => json_encode($msg, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
             ':ts'      => $created_ts,
+            ':stored'  => $now,                     // server-side insertion time
             ':exp'     => $now + 30 * 24 * 3600,   // keep for 30 days
         ]);
         if ($stmt->rowCount() > 0) {
@@ -393,9 +412,9 @@ function route_messages_get(): never
     $stmt = $db->prepare(
         'SELECT payload FROM relay_messages
          WHERE  circle_hint = :ch
-           AND  created_ts  > :since
+           AND  stored_at   > :since
            AND  expires_at  > :now
-         ORDER BY created_ts ASC, msg_id ASC
+         ORDER BY stored_at ASC, msg_id ASC
          LIMIT :lim'
     );
     $stmt->execute([':ch' => $circle_hint, ':since' => $since, ':now' => $now, ':lim' => $limit]);

@@ -16,6 +16,7 @@ class NodeConfig:
     bind: str
     port: int
     display_name: str = "anon"
+    rendezvous_base: str = ""  # e.g. "https://felund.com/api"; empty = disabled
 
 
 @dataclasses.dataclass

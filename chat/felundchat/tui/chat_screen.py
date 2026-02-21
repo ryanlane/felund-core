@@ -41,7 +41,7 @@ from felundchat.transport import detect_local_ip
 
 from ._utils import _peer_color, _render_text_with_mentions
 from .commands import CommandsMixin
-from .modals import InviteModal
+from .modals import InviteModal, SettingsModal
 
 from rich.markup import escape as markup_escape
 from textual.suggester import Suggester
@@ -90,8 +90,9 @@ class ChatScreen(CommandsMixin, Screen):
 
     BINDINGS = [
         Binding("ctrl+q", "app.quit", "Quit"),
-        Binding("f2", "show_invite", "Invite code"),
         Binding("f1", "show_help", "Help"),
+        Binding("f2", "show_invite", "Invite code"),
+        Binding("f3", "show_settings", "Settings"),
         Binding("escape", "focus_input", "Focus input"),
     ]
 
@@ -174,8 +175,13 @@ class ChatScreen(CommandsMixin, Screen):
         await self.node.start_server()
         self._gossip_task = asyncio.create_task(self.node.gossip_loop())
 
-        api_base = safe_api_base_from_env()
+        # Use the URL saved in settings, falling back to the env var for
+        # backwards compatibility with existing deployments.
+        api_base = self.state.node.rendezvous_base or safe_api_base_from_env()
         if api_base:
+            # Persist so it survives restarts even if only set via env var.
+            if not self.state.node.rendezvous_base:
+                self.state.node.rendezvous_base = api_base
             self._rendezvous_task = asyncio.create_task(self._rendezvous_loop(api_base))
             self._log_system(f"Rendezvous enabled: {api_base}")
 
@@ -446,6 +452,45 @@ class ChatScreen(CommandsMixin, Screen):
 
     async def action_show_help(self) -> None:
         await self._handle_command("/help")
+
+    async def action_show_settings(self) -> None:
+        current_base = self.state.node.rendezvous_base or safe_api_base_from_env()
+        await self.app.push_screen(
+            SettingsModal(
+                display_name=self.state.node.display_name,
+                rendezvous_base=current_base,
+                node_id=self.state.node.node_id,
+            ),
+            self._on_settings_saved,
+        )
+
+    async def _on_settings_saved(self, result: dict | None) -> None:
+        if not result:
+            return
+
+        new_name = result["display_name"]
+        new_base = result["rendezvous_base"]
+        old_base = self.state.node.rendezvous_base
+
+        self.state.node.display_name = new_name
+        self.state.node.rendezvous_base = new_base
+        self.state.node_display_names[self.state.node.node_id] = new_name
+
+        async with self.node._lock:
+            save_state(self.state)
+
+        self._log_system(f"Settings saved. Name: {new_name!r}  Relay: {new_base or '(disabled)'}")
+
+        # Restart the relay loop only if the URL actually changed.
+        if new_base != old_base:
+            if self._rendezvous_task:
+                self._rendezvous_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._rendezvous_task
+                self._rendezvous_task = None
+            if new_base:
+                self._rendezvous_task = asyncio.create_task(self._rendezvous_loop(new_base))
+                self._log_system(f"Relay reconnecting to {new_base}")
 
     def action_focus_input(self) -> None:
         self.query_one("#message-input", Input).focus()

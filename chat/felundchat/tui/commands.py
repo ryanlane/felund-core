@@ -23,7 +23,7 @@ from felundchat.persistence import save_state
 from felundchat.transport import public_addr_hint
 
 from ._utils import mentions_me, _render_text_with_mentions
-from .modals import HelpModal, InviteModal
+from .modals import HelpModal, InviteModal, SettingsModal
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +41,7 @@ def _help_lines(topic: str = "") -> list:
         "",
         "[bold cyan]General[/bold cyan]",
         "  [bold]/help[/bold] [dim][topic][/dim]           This screen; /help channel for channel docs",
+        "  [bold]/settings[/bold]               Open settings modal (display name, relay URL)",
         "  [bold]/quit[/bold]                   Exit felundchat",
         "  [bold]/debug[/bold]                  Toggle gossip-sync debug log",
         "",
@@ -76,8 +77,9 @@ def _help_lines(topic: str = "") -> list:
         "                          N                →  how many to show (default 20).",
         "",
         "[bold cyan]Keyboard shortcuts[/bold cyan]",
-        "  [bold]F2[/bold]         Show invite code modal",
         "  [bold]F1[/bold]         Open this help screen",
+        "  [bold]F2[/bold]         Show invite code modal",
+        "  [bold]F3[/bold]         Open settings (display name, relay URL)",
         "  [bold]Ctrl+Q[/bold]     Quit",
         "  [bold]Escape[/bold]     Focus the message input",
         "  [bold]Tab[/bold]        Accept @mention autocomplete suggestion",
@@ -184,6 +186,9 @@ class CommandsMixin:
 
         elif cmd == "/name":
             await self._cmd_name(parts)
+
+        elif cmd == "/settings":
+            await self.action_show_settings()
 
         elif cmd == "/debug":
             if self.node:
