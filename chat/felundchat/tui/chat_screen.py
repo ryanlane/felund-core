@@ -30,6 +30,9 @@ from felundchat.rendezvous_client import (
     is_network_error,
     lookup_peer_addrs,
     merge_discovered_peers,
+    merge_relay_messages,
+    pull_messages_from_relay,
+    push_messages_to_relay,
     register_presence,
     safe_api_base_from_env,
     unregister_presence,
@@ -136,6 +139,8 @@ class ChatScreen(CommandsMixin, Screen):
         self._seen: Set[str] = set()
         self._gossip_task: Optional[asyncio.Task] = None
         self._rendezvous_task: Optional[asyncio.Task] = None
+        # Per-circle relay cursor: last server_time returned by GET /v1/messages
+        self._relay_cursors: dict = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -332,6 +337,7 @@ class ChatScreen(CommandsMixin, Screen):
                 cids = list(self.state.circles.keys())
             for cid in cids:
                 try:
+                    # ── Presence + peer discovery (TCP gossip) ─────────────
                     await asyncio.to_thread(register_presence, api_base, self.state, cid)
                     discovered = await asyncio.to_thread(lookup_peer_addrs, api_base, self.state, cid)
                     async with self.node._lock:
@@ -343,6 +349,24 @@ class ChatScreen(CommandsMixin, Screen):
                 except Exception as e:
                     if self.node.debug_sync and not is_network_error(e):
                         self._log_system(f"[api] {cid[:8]}: {type(e).__name__}: {e}")
+
+                try:
+                    # ── Relay message sync (for web clients) ───────────────
+                    await asyncio.to_thread(push_messages_to_relay, api_base, self.state, cid)
+                    since = self._relay_cursors.get(cid, 0)
+                    raw_msgs, server_time = await asyncio.to_thread(
+                        pull_messages_from_relay, api_base, self.state, cid, since
+                    )
+                    async with self.node._lock:
+                        new_msgs = merge_relay_messages(self.state, cid, raw_msgs)
+                        if new_msgs:
+                            save_state(self.state)
+                    if server_time > since:
+                        self._relay_cursors[cid] = server_time
+                except Exception as e:
+                    if self.node.debug_sync and not is_network_error(e):
+                        self._log_system(f"[relay] {cid[:8]}: {type(e).__name__}: {e}")
+
             try:
                 await asyncio.wait_for(self.node._stop_event.wait(), timeout=8)
             except asyncio.TimeoutError:

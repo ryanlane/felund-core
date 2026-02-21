@@ -63,12 +63,26 @@ function db(): PDO
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_circle  ON presence (circle_hint)');
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_expires ON presence (expires_at)');
 
+    // Relay: shared message store for clients that cannot open direct TCP
+    // connections (e.g. browsers).  Messages are HMAC-verified by clients;
+    // the server stores them opaquely and never inspects the content.
+    $pdo->exec('CREATE TABLE IF NOT EXISTS relay_messages (
+        msg_id      TEXT    NOT NULL PRIMARY KEY,
+        circle_hint TEXT    NOT NULL,
+        payload     TEXT    NOT NULL,
+        created_ts  INTEGER NOT NULL,
+        expires_at  INTEGER NOT NULL
+    )');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_rmsg_circle ON relay_messages (circle_hint, created_ts)');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_rmsg_exp    ON relay_messages (expires_at)');
+
     return $pdo;
 }
 
 function db_prune(PDO $db, int $now): void
 {
-    $db->exec("DELETE FROM presence WHERE expires_at <= $now");
+    $db->exec("DELETE FROM presence       WHERE expires_at <= $now");
+    $db->exec("DELETE FROM relay_messages WHERE expires_at <= $now");
 }
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
@@ -308,6 +322,95 @@ function route_unregister(): never
     json_response(['ok' => true, 'removed' => $stmt->rowCount() > 0]);
 }
 
+function route_messages_post(): never
+{
+    $data        = json_body();
+    $circle_hint = require_str($data, 'circle_hint', 8, 128);
+    $msgs        = $data['messages'] ?? [];
+    if (!is_array($msgs)) {
+        http_error("'messages' must be an array");
+    }
+    if (count($msgs) > 50) {
+        http_error('Too many messages (max 50 per batch)');
+    }
+
+    $now  = time();
+    $db   = db();
+    db_prune($db, $now);
+
+    $stmt    = $db->prepare(
+        'INSERT OR IGNORE INTO relay_messages (msg_id, circle_hint, payload, created_ts, expires_at)
+         VALUES (:mid, :ch, :payload, :ts, :exp)'
+    );
+    $stored = 0;
+
+    foreach ($msgs as $i => $msg) {
+        if (!is_array($msg)) {
+            http_error("messages[$i] must be an object");
+        }
+        $msg_id = $msg['msg_id'] ?? '';
+        if (!is_string($msg_id) || strlen($msg_id) < 8 || strlen($msg_id) > 64) {
+            http_error("messages[$i].msg_id is invalid");
+        }
+        $created_ts = $msg['created_ts'] ?? 0;
+        if (!is_int($created_ts) || $created_ts < 0) {
+            http_error("messages[$i].created_ts must be a non-negative integer");
+        }
+        $text = $msg['text'] ?? '';
+        if (!is_string($text) || strlen($text) > 4096) {
+            http_error("messages[$i].text exceeds 4 096 chars");
+        }
+
+        $stmt->execute([
+            ':mid'     => $msg_id,
+            ':ch'      => $circle_hint,
+            ':payload' => json_encode($msg, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+            ':ts'      => $created_ts,
+            ':exp'     => $now + 30 * 24 * 3600,   // keep for 30 days
+        ]);
+        if ($stmt->rowCount() > 0) {
+            $stored++;
+        }
+    }
+
+    json_response(['ok' => true, 'stored' => $stored]);
+}
+
+function route_messages_get(): never
+{
+    $circle_hint = $_GET['circle_hint'] ?? '';
+    if (strlen($circle_hint) < 8 || strlen($circle_hint) > 128) {
+        http_error("Query param 'circle_hint' is required (8–128 chars)");
+    }
+
+    $since = (int) ($_GET['since'] ?? 0);
+    $limit = (int) ($_GET['limit'] ?? 200);
+    $limit = max(1, min($limit, 500));
+
+    $now  = time();
+    $db   = db();
+
+    $stmt = $db->prepare(
+        'SELECT payload FROM relay_messages
+         WHERE  circle_hint = :ch
+           AND  created_ts  > :since
+           AND  expires_at  > :now
+         ORDER BY created_ts ASC, msg_id ASC
+         LIMIT :lim'
+    );
+    $stmt->execute([':ch' => $circle_hint, ':since' => $since, ':now' => $now, ':lim' => $limit]);
+
+    $messages = [];
+    while ($row = $stmt->fetch()) {
+        $decoded = json_decode($row['payload'], true);
+        if (is_array($decoded)) {
+            $messages[] = $decoded;
+        }
+    }
+
+    json_response(['ok' => true, 'messages' => $messages, 'server_time' => $now]);
+}
+
 // ── Router ────────────────────────────────────────────────────────────────────
 
 // Preflight CORS
@@ -330,5 +433,7 @@ match (true) {
     $method === 'POST'   && $path === '/register' => route_register(),
     $method === 'GET'    && $path === '/peers'    => route_peers(),
     $method === 'DELETE' && $path === '/register' => route_unregister(),
+    $method === 'POST'   && $path === '/messages' => route_messages_post(),
+    $method === 'GET'    && $path === '/messages' => route_messages_get(),
     default                                       => http_error("Not found: $method $path", 404),
 };

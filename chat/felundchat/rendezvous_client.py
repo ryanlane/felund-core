@@ -120,6 +120,101 @@ def merge_discovered_peers(state: State, circle_id: str, peer_addrs: List[Tuple[
     return changed
 
 
+def push_messages_to_relay(api_base: str, state: State, circle_id: str) -> int:
+    """Push local messages for *circle_id* to the relay server.
+
+    Only the 100 most-recent non-control messages are sent per call.
+    Returns the number of newly stored messages reported by the server.
+    """
+    msgs = sorted(
+        (
+            m for m in state.messages.values()
+            if m.circle_id == circle_id and m.channel_id != "__control"
+        ),
+        key=lambda m: m.created_ts,
+    )[-100:]
+    if not msgs:
+        return 0
+    hint = circle_hint(circle_id)
+    stored_total = 0
+    for i in range(0, len(msgs), 50):  # server limit: 50 per batch
+        batch = msgs[i : i + 50]
+        payload = {
+            "circle_hint": hint,
+            "messages": [
+                {
+                    "msg_id": m.msg_id,
+                    "circle_id": m.circle_id,
+                    "channel_id": m.channel_id,
+                    "author_node_id": m.author_node_id,
+                    "display_name": m.display_name,
+                    "created_ts": m.created_ts,
+                    "text": m.text,
+                    "mac": m.mac,
+                }
+                for m in batch
+            ],
+        }
+        data = _api_request("POST", f"{api_base}/v1/messages", payload)
+        stored_total += data.get("stored", 0)
+    return stored_total
+
+
+def pull_messages_from_relay(
+    api_base: str,
+    state: State,
+    circle_id: str,
+    since: int = 0,
+) -> Tuple[List[dict], int]:
+    """Fetch messages from the relay for *circle_id* newer than *since*.
+
+    Returns ``(raw_message_dicts, server_time)`` — pass *server_time* as
+    *since* on the next call to avoid re-fetching already-seen messages.
+    """
+    hint = circle_hint(circle_id)
+    query = urllib.parse.urlencode({"circle_hint": hint, "since": since, "limit": 200})
+    data = _api_request("GET", f"{api_base}/v1/messages?{query}")
+    return data.get("messages", []), int(data.get("server_time", 0))
+
+
+def merge_relay_messages(state: State, circle_id: str, raw_msgs: List[dict]) -> bool:
+    """Merge relay messages into *state* after verifying each MAC.
+
+    Skips messages already present.  Returns True if anything was added.
+    """
+    from .crypto import verify_message_mac
+    from .models import ChatMessage
+
+    circle = state.circles.get(circle_id)
+    if not circle:
+        return False
+    changed = False
+    for raw in raw_msgs:
+        msg_id = str(raw.get("msg_id", ""))
+        if not msg_id or msg_id in state.messages:
+            continue
+        try:
+            msg = ChatMessage(
+                msg_id=msg_id,
+                circle_id=str(raw.get("circle_id", "")),
+                channel_id=str(raw.get("channel_id", "general")),
+                author_node_id=str(raw.get("author_node_id", "")),
+                display_name=str(raw.get("display_name", "")),
+                created_ts=int(raw.get("created_ts", 0)),
+                text=str(raw.get("text", "")),
+                mac=str(raw.get("mac", "")),
+            )
+        except (TypeError, ValueError):
+            continue
+        if msg.circle_id != circle_id:
+            continue
+        if not verify_message_mac(circle.secret_hex, msg):
+            continue
+        state.messages[msg_id] = msg
+        changed = True
+    return changed
+
+
 def safe_api_base_from_env() -> str:
     import os
 
