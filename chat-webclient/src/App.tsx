@@ -13,7 +13,7 @@ import {
   sendMessage,
   visibleMessages,
 } from './core/state'
-import { sha256Hex } from './core/crypto'
+import { sha256HexFromRawKey } from './core/crypto'
 import {
   healthCheck,
   lookupPeers,
@@ -261,7 +261,7 @@ function App() {
         await createCircle(next, circleName)
       } else {
         const parsed = parseInviteCode(inviteInput.trim())
-        const circleId = (await sha256Hex(parsed.secretHex)).slice(0, 24)
+        const circleId = (await sha256HexFromRawKey(parsed.secretHex)).slice(0, 24)
         joinCircle(next, {
           circleId,
           secretHex: parsed.secretHex,
@@ -364,7 +364,7 @@ function App() {
       const code = parts[1]
       if (!code) throw new Error('Usage: /join <invite-code>')
       const parsed = parseInviteCode(code)
-      const circleId = (await sha256Hex(parsed.secretHex)).slice(0, 24)
+      const circleId = (await sha256HexFromRawKey(parsed.secretHex)).slice(0, 24)
       joinCircle(next, { circleId, secretHex: parsed.secretHex, name: '', isOwned: false })
       setStatus(`Joined circle ${circleId.slice(0, 8)}. Sync will start shortly.`)
       return

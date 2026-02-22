@@ -10,7 +10,7 @@ from textual.widgets import Button, Footer, Input, Label
 
 from felundchat.chat import create_circle, ensure_default_channel
 from felundchat.crypto import sha256_hex
-from felundchat.invite import make_felund_code, parse_felund_code
+from felundchat.invite import is_relay_url, make_felund_code, parse_felund_code
 from felundchat.models import Circle
 from felundchat.persistence import load_state, save_state
 from felundchat.transport import detect_local_ip, public_addr_hint
@@ -155,7 +155,9 @@ class SetupScreen(Screen):
             state.circle_members.setdefault(circle_id, set()).add(state.node.node_id)
             ensure_default_channel(state, circle_id)
             save_state(state)
-            bootstrap_peer = peer_addr
+            # Web-client codes carry a relay URL instead of a TCP address.
+            # In that case skip the direct TCP bootstrap; the relay loop handles it.
+            bootstrap_peer = peer_addr if not is_relay_url(peer_addr) else None
             bootstrap_circle = circle_id
 
         await self.app.push_screen(

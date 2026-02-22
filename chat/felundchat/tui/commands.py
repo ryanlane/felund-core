@@ -17,7 +17,7 @@ from felundchat.channel_sync import (
 )
 from felundchat.chat import create_circle, ensure_default_channel
 from felundchat.crypto import sha256_hex
-from felundchat.invite import make_felund_code, parse_felund_code
+from felundchat.invite import is_relay_url, make_felund_code, parse_felund_code
 from felundchat.models import Channel, Circle, now_ts
 from felundchat.persistence import save_state
 from felundchat.transport import public_addr_hint
@@ -233,8 +233,9 @@ class CommandsMixin:
         self._seen = set()
         self.query_one("#message-log", RichLog).clear()
         self._refresh_sidebar()
-        asyncio.create_task(self.node.connect_and_sync(peer_addr, circle_id))
-        self._log_system(f"Joined circle {circle_id[:8]}. Syncing...")
+        if peer_addr and not is_relay_url(peer_addr):
+            asyncio.create_task(self.node.connect_and_sync(peer_addr, circle_id))
+        self._log_system(f"Joined circle {circle_id[:8]}. Syncing via relay...")
         self._load_history()
 
     def _cmd_who(self, parts: list) -> None:

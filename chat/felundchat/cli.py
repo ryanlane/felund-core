@@ -13,7 +13,7 @@ from felundchat.chat import (
 )
 from felundchat.crypto import make_message_mac, sha256_hex
 from felundchat.gossip import GossipNode
-from felundchat.invite import make_felund_code, parse_felund_code
+from felundchat.invite import is_relay_url, make_felund_code, parse_felund_code
 from felundchat.models import ChatMessage, Circle, now_ts
 from felundchat.persistence import load_state, save_state
 from felundchat.transport import detect_local_ip, parse_hostport, public_addr_hint
@@ -79,11 +79,14 @@ def cmd_join(args: argparse.Namespace) -> None:
     ensure_default_channel(state, circle_id)
     save_state(state)
 
-    print(f"Joined circle {circle_id}. Bootstrapping via {peer_addr} ...")
     node = GossipNode(state)
 
     async def _bootstrap() -> None:
-        await node.connect_and_sync(peer_addr, circle_id)
+        if peer_addr and not is_relay_url(peer_addr):
+            print(f"Joined circle {circle_id}. Bootstrapping via {peer_addr} ...")
+            await node.connect_and_sync(peer_addr, circle_id)
+        else:
+            print(f"Joined circle {circle_id}. Messages will arrive via relay.")
 
     asyncio.run(_bootstrap())
     print("Bootstrap attempted. Now run:")

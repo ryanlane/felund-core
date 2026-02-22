@@ -13,6 +13,15 @@ def make_felund_code(secret_hex: str, peer_addr: str) -> str:
     return "felund1." + base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
+def is_relay_url(peer: str) -> bool:
+    """Return True when peer is a relay/rendezvous URL rather than a TCP host:port.
+
+    Web clients have no TCP listener so they embed their rendezvous server URL
+    in the invite code instead of a host:port address.
+    """
+    return peer.startswith(("http://", "https://", "//"))
+
+
 def parse_felund_code(code: str) -> Tuple[str, str]:
     code = code.strip()
     if not code.startswith("felund1."):
@@ -25,8 +34,12 @@ def parse_felund_code(code: str) -> Tuple[str, str]:
         raise ValueError("Unsupported code version")
     secret_hex = str(payload.get("secret", "")).strip().lower()
     peer_addr = str(payload.get("peer", "")).strip()
-    if not secret_hex or not peer_addr:
-        raise ValueError("Code missing fields")
+    if not secret_hex:
+        raise ValueError("Code missing secret")
     bytes.fromhex(secret_hex)
-    parse_hostport(peer_addr)
+    # peer_addr may be a TCP host:port (Python/desktop clients) or a relay URL
+    # (web clients that have no TCP listener).  Only validate as host:port for
+    # the TCP case; relay URLs are accepted as-is.
+    if peer_addr and not is_relay_url(peer_addr):
+        parse_hostport(peer_addr)
     return secret_hex, peer_addr

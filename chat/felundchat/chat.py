@@ -17,7 +17,7 @@ from felundchat.channel_sync import (
 )
 from felundchat.crypto import make_message_mac, sha256_hex
 from felundchat.gossip import GossipNode
-from felundchat.invite import make_felund_code, parse_felund_code
+from felundchat.invite import is_relay_url, make_felund_code, parse_felund_code
 from felundchat.models import Channel, ChatMessage, Circle, State, now_ts
 from felundchat.persistence import load_state, save_state
 from felundchat.rendezvous_client import (
@@ -813,11 +813,15 @@ async def run_interactive_flow() -> None:
         rendezvous_task = asyncio.create_task(rendezvous_loop())
         print(f"[api] rendezvous enabled: {api_base}")
 
+    # Web-client codes carry a relay URL instead of a TCP host:port.
+    # In that case skip the direct TCP bootstrap; the relay loop handles sync.
+    tcp_peer = peer if peer and not is_relay_url(peer) else None
+
     bootstrap_task: Optional[asyncio.Task] = None
-    if mode == "client" and peer:
+    if mode == "client" and tcp_peer:
         async def periodic_bootstrap() -> None:
             while not node._stop_event.is_set():
-                await node.connect_and_sync(peer, selected_circle_id or "")
+                await node.connect_and_sync(tcp_peer, selected_circle_id or "")
                 try:
                     await asyncio.wait_for(node._stop_event.wait(), timeout=5)
                 except asyncio.TimeoutError:
@@ -826,9 +830,9 @@ async def run_interactive_flow() -> None:
         bootstrap_task = asyncio.create_task(periodic_bootstrap())
 
     try:
-        if mode == "client" and peer:
-            await node.connect_and_sync(peer, selected_circle_id or "")
-        await interactive_chat(node, state, selected_circle_id, bootstrap_peer=peer)
+        if mode == "client" and tcp_peer:
+            await node.connect_and_sync(tcp_peer, selected_circle_id or "")
+        await interactive_chat(node, state, selected_circle_id, bootstrap_peer=tcp_peer)
     finally:
         node.stop()
         gossip_task.cancel()

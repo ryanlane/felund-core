@@ -1,6 +1,6 @@
 import { openDB } from 'idb'
 
-import { hmacHex, randomHex, sha256Hex } from './crypto'
+import { hmacHex, randomHex, sha256Hex, sha256HexFromRawKey } from './crypto'
 import type { AccessMode, ChatMessage, Channel, Circle, State } from './models'
 import { nowTs } from './models'
 
@@ -80,7 +80,7 @@ export const ensureGeneralChannel = (state: State, circleId: string): void => {
 
 export const createCircle = async (state: State, name: string): Promise<Circle> => {
   const secretHex = randomHex(32)
-  const circleId = (await sha256Hex(secretHex)).slice(0, 24)
+  const circleId = (await sha256HexFromRawKey(secretHex)).slice(0, 24)
   const circle: Circle = { circleId, secretHex, name: name.trim(), isOwned: true }
   state.circles[circleId] = circle
   ensureGeneralChannel(state, circleId)

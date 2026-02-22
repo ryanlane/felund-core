@@ -16,6 +16,22 @@ export const sha256Hex = async (input: string): Promise<string> => {
   return toHex(new Uint8Array(digest))
 }
 
+/**
+ * SHA-256 of the raw bytes represented by a hex string.
+ *
+ * Used for circle ID derivation to match the Python client, which hashes the
+ * raw 32-byte secret rather than its hex-encoded form:
+ *   Python: sha256(bytes.fromhex(secret_hex))
+ *   Web:    sha256HexFromRawKey(secretHex)
+ */
+export const sha256HexFromRawKey = async (hexInput: string): Promise<string> => {
+  const bytes = Uint8Array.from(
+    (hexInput.match(/.{1,2}/g) ?? []).map((pair) => parseInt(pair, 16)),
+  )
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return toHex(new Uint8Array(digest))
+}
+
 export const hmacHex = async (keyHex: string, input: string): Promise<string> => {
   const keyRaw = Uint8Array.from(keyHex.match(/.{1,2}/g)?.map((pair) => parseInt(pair, 16)) ?? [])
   const key = await crypto.subtle.importKey(
