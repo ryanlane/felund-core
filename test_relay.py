@@ -16,15 +16,19 @@ Tests
 
 Usage
 -----
-    python test_relay.py                          # uses https://felund.com/api
-    python test_relay.py http://localhost:8000    # local dev server
-    python test_relay.py https://felund.com/api --verbose
+    python test_relay.py http://localhost:8000           # explicit URL
+    python test_relay.py http://localhost:8000 --verbose
+
+    # Or read from the environment:
+    export FELUND_API_BASE=http://localhost:8000
+    python test_relay.py
 """
 from __future__ import annotations
 
 import hashlib
 import hmac as _hmac
 import json
+import os
 import secrets
 import sys
 import threading
@@ -416,6 +420,11 @@ def run_test(api_base: str, verbose: bool = False) -> bool:
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
-    target = args[0] if args else "https://felund.com/api"
+    target = args[0] if args else os.getenv("FELUND_API_BASE", "").strip()
+    if not target:
+        print("Error: no relay URL given.")
+        print("  python test_relay.py http://localhost:8000")
+        print("  export FELUND_API_BASE=http://localhost:8000  &&  python test_relay.py")
+        sys.exit(1)
     ok = run_test(target, verbose=verbose)
     sys.exit(0 if ok else 1)

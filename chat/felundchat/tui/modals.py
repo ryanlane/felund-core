@@ -77,7 +77,7 @@ class SettingsModal(ModalScreen):
             yield Input(
                 value=self._rendezvous_base,
                 id="input-rendezvous",
-                placeholder="https://felund.com/api  (leave blank to disable)",
+                placeholder="https://your-relay-server/api  (leave blank to disable)",
             )
             yield Label("", id="settings-status")
             with Horizontal(id="settings-buttons"):

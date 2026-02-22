@@ -16,7 +16,7 @@ class NodeConfig:
     bind: str
     port: int
     display_name: str = "anon"
-    rendezvous_base: str = ""  # e.g. "https://felund.com/api"; empty = disabled
+    rendezvous_base: str = ""  # relay URL; set via FELUND_API_BASE env or F3 settings; empty = disabled
 
 
 @dataclasses.dataclass

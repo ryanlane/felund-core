@@ -16,7 +16,7 @@ const defaultState = (): State => {
       displayName: 'anon',
     },
     settings: {
-      rendezvousBase: 'https://felund.com/api',
+      rendezvousBase: import.meta.env.VITE_FELUND_API_BASE || '',
     },
     circles: {},
     channels: {},

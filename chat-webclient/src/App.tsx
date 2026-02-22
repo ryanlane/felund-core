@@ -86,7 +86,7 @@ function App() {
       const loaded = await loadState()
       setState(loaded)
       setDisplayName(loaded.node.displayName || 'anon')
-      setRendezvousInput(loaded.settings.rendezvousBase || 'https://felund.com/api')
+      setRendezvousInput(loaded.settings.rendezvousBase || '')
     })()
   }, [])
 
@@ -515,7 +515,7 @@ function App() {
                 <input
                   value={rendezvousInput}
                   onChange={(e) => setRendezvousInput(e.target.value)}
-                  placeholder="https://felund.com/api"
+                  placeholder="https://your-relay-server/api"
                 />
               </label>
               {status && <p className="tui-error">{status}</p>}
@@ -668,7 +668,7 @@ function App() {
                 <input
                   value={rendezvousInput}
                   onChange={(e) => setRendezvousInput(e.target.value)}
-                  placeholder="https://felund.com/api"
+                  placeholder="https://your-relay-server/api"
                 />
               </label>
               <p className="tui-dim" style={{ margin: 0, fontSize: '0.78rem' }}>
