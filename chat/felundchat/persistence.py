@@ -3,12 +3,8 @@ from __future__ import annotations
 import dataclasses
 import json
 
-from felundchat.config import (
-    APP_DIR,
-    MESSAGE_MAX_AGE_S,
-    MAX_MESSAGES_PER_CIRCLE,
-    STATE_FILE,
-)
+import felundchat.config as _cfg
+from felundchat.config import MESSAGE_MAX_AGE_S, MAX_MESSAGES_PER_CIRCLE
 from felundchat.models import (
     ChatMessage,
     Channel,
@@ -27,12 +23,12 @@ def _load_dataclass_strict(cls, payload: dict, label: str):
     except TypeError as e:
         raise ValueError(
             f"State schema mismatch in {label}: {e}. "
-            f"Delete or reset {STATE_FILE} to start fresh with the current schema."
+            f"Delete or reset {_cfg.STATE_FILE} to start fresh with the current schema."
         ) from e
 
 
 def ensure_app_dir() -> None:
-    APP_DIR.mkdir(parents=True, exist_ok=True)
+    _cfg.APP_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def prune_messages(state: State) -> None:
@@ -57,10 +53,10 @@ def prune_messages(state: State) -> None:
 
 def load_state() -> State:
     ensure_app_dir()
-    if not STATE_FILE.exists():
+    if not _cfg.STATE_FILE.exists():
         return State.default(bind="0.0.0.0", port=9999)
 
-    data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    data = json.loads(_cfg.STATE_FILE.read_text(encoding="utf-8"))
     node = _load_dataclass_strict(NodeConfig, data["node"], "node")
 
     circles = {
@@ -137,6 +133,6 @@ def save_state(state: State) -> None:
         },
         "node_display_names": dict(state.node_display_names),
     }
-    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp = _cfg.STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(STATE_FILE)
+    tmp.replace(_cfg.STATE_FILE)

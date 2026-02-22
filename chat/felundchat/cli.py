@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import secrets
+from pathlib import Path
 
 from felundchat.chat import (
     create_circle,
@@ -190,6 +191,11 @@ def cmd_tui(args: argparse.Namespace) -> bool:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="felundchat", description="Simple gossip + direct connect chat")
+    p.add_argument(
+        "--state-dir",
+        metavar="DIR",
+        help="Override state directory (default: ~/.felundchat, env: FELUND_STATE_DIR)",
+    )
     sub = p.add_subparsers(dest="cmd", required=False)
 
     sp = sub.add_parser("init", help="Initialize local node")
@@ -238,9 +244,19 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _apply_state_dir(args: argparse.Namespace) -> None:
+    """Override config APP_DIR/STATE_FILE if --state-dir was given."""
+    state_dir = getattr(args, "state_dir", None)
+    if state_dir:
+        import felundchat.config as _cfg
+        _cfg.APP_DIR = Path(state_dir).expanduser().resolve()
+        _cfg.STATE_FILE = _cfg.APP_DIR / "state.json"
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    _apply_state_dir(args)
     if not getattr(args, "cmd", None):
         if not cmd_tui(args):
             asyncio.run(run_interactive_flow())

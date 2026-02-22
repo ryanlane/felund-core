@@ -10,8 +10,10 @@ from typing import List, Optional, Set
 from felundchat.channel_sync import (
     CONTROL_CHANNEL_ID,
     apply_channel_event,
+    apply_circle_name_event,
     make_channel_event_message,
     parse_channel_event,
+    parse_circle_name_event,
 )
 from felundchat.crypto import make_message_mac, sha256_hex
 from felundchat.gossip import GossipNode
@@ -268,6 +270,13 @@ async def interactive_chat(
                         async with node._lock:
                             apply_channel_event(state, circle_id, event)
                             save_state(state)
+                    else:
+                        name_event = parse_circle_name_event(m.text)
+                        if name_event:
+                            assert circle_id is not None
+                            async with node._lock:
+                                apply_circle_name_event(state, circle_id, name_event)
+                                save_state(state)
                     continue
                 sys.stdout.write("\r")
                 print(render_message(m, state))

@@ -6,7 +6,13 @@ import secrets
 from typing import Any, Dict, List, Optional
 
 from felundchat.crypto import make_token, verify_message_mac, verify_token
-from felundchat.channel_sync import CONTROL_CHANNEL_ID, apply_channel_event, parse_channel_event
+from felundchat.channel_sync import (
+    CONTROL_CHANNEL_ID,
+    apply_channel_event,
+    apply_circle_name_event,
+    parse_channel_event,
+    parse_circle_name_event,
+)
 from felundchat.models import ChatMessage, Peer, State, now_ts
 from felundchat.persistence import save_state
 from felundchat.transport import (
@@ -225,6 +231,10 @@ class GossipNode:
                     event = parse_channel_event(m.text)
                     if event:
                         apply_channel_event(self.state, circle_id, event)
+                    else:
+                        name_event = parse_circle_name_event(m.text)
+                        if name_event:
+                            apply_circle_name_event(self.state, circle_id, name_event)
 
     def _resolve_peer_addr(self, peername: Any, listen_addr: str) -> str:
         if not listen_addr:
