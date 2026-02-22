@@ -90,50 +90,10 @@ function App() {
     })()
   }, [])
 
-  // ── Presence registration (every 60 s) ────────────────────────────────────
-
-  useEffect(() => {
-    if (!state) return
-
-    const base = normalizeRendezvousBase(state.settings.rendezvousBase)
-    const circleIds = Object.keys(state.circles)
-    if (!base || circleIds.length === 0) return
-
-    let active = true
-    const nodeId = state.node.nodeId
-
-    const registerAll = async () => {
-      for (const circleId of circleIds) {
-        if (!active) return
-        try {
-          await registerPresence(base, { nodeId, circleId, ttlS: 120 })
-        } catch {
-          /* non-fatal */
-        }
-      }
-    }
-
-    const unregisterAll = async () => {
-      for (const circleId of circleIds) {
-        try {
-          await unregisterPresence(base, { nodeId, circleId })
-        } catch {
-          /* best-effort */
-        }
-      }
-    }
-
-    void registerAll()
-    const timerId = window.setInterval(() => void registerAll(), 60_000)
-    window.addEventListener('beforeunload', () => void unregisterAll())
-    return () => {
-      active = false
-      window.clearInterval(timerId)
-      void unregisterAll()
-    }
-  }, [state?.settings.rendezvousBase, state?.node.nodeId, state?.circles])
-
-  // ── Relay sync + peer count (every 5 s) ───────────────────────────────────
+  // ── Relay sync: register presence, push/pull messages, peer count ────────────
+  // All relay operations run in a single loop so that presence registration
+  // always completes before the peer lookup in every cycle.  Registration is
+  // throttled to once per 60 s; message sync runs every 5 s.
 
   const rendezvousBase = state?.settings.rendezvousBase ?? ''
   useEffect(() => {
@@ -142,20 +102,43 @@ function App() {
 
     let stopped = false
 
-    // Cursors are local to this effect instance so React Strict Mode's
-    // mount→cleanup→remount cycle starts each instance with since=0,
-    // guaranteeing the full message history is fetched on every fresh mount.
+    // Cursors local to this effect instance — Strict Mode safe (see note above).
     const cursors: Record<string, number> = {}
-
-    // Track which of OUR OWN messages have been confirmed pushed this session.
-    // We only push own messages (others are already in the relay) and skip
-    // already-pushed ones to avoid hammering the server every 5 s.
+    // Only push our own messages not yet confirmed sent this session.
     const pushedMsgIds = new Set<string>()
+    // Throttle presence registration to once per 60 s per circle.
+    const lastRegisteredAt: Record<string, number> = {}
+    const REGISTER_INTERVAL_MS = 60_000
+
+    const unregisterAll = async (s: { node: { nodeId: string }; circles: Record<string, unknown> }) => {
+      for (const circleId of Object.keys(s.circles)) {
+        try {
+          await unregisterPresence(base, { nodeId: s.node.nodeId, circleId })
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
 
     const syncAll = async () => {
       const s = stateRef.current
       if (!s || stopped) return
 
+      const now = Date.now()
+
+      // ── 1. Register presence (before peer lookup) ──────────────────────────
+      for (const circleId of Object.keys(s.circles)) {
+        if (!lastRegisteredAt[circleId] || now - lastRegisteredAt[circleId] > REGISTER_INTERVAL_MS) {
+          try {
+            await registerPresence(base, { nodeId: s.node.nodeId, circleId, ttlS: 120 })
+            lastRegisteredAt[circleId] = now
+          } catch {
+            /* non-fatal */
+          }
+        }
+      }
+
+      // ── 2. Push + pull messages ────────────────────────────────────────────
       for (const [circleId, circle] of Object.entries(s.circles)) {
         try {
           // Push only OUR messages not yet confirmed sent this session.
@@ -207,8 +190,7 @@ function App() {
           }
 
           // Use serverTime - 1 so messages stored in the same server-second as
-          // the pull are still visible next cycle (caught by stored_at > since).
-          // msgId dedup above prevents showing them twice.
+          // the pull are still visible next cycle.  msgId dedup prevents doubles.
           if (serverTime > 0) {
             cursors[circleId] = Math.max(since, serverTime - 1)
           }
@@ -217,7 +199,7 @@ function App() {
         }
       }
 
-      // Update peer count for the active circle
+      // ── 3. Peer count (registration already done above) ───────────────────
       const s2 = stateRef.current
       if (s2?.currentCircleId && !stopped) {
         try {
@@ -229,11 +211,20 @@ function App() {
       }
     }
 
+    const onBeforeUnload = () => {
+      const s = stateRef.current
+      if (s) void unregisterAll(s)
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+
     void syncAll()
     const timerId = window.setInterval(() => void syncAll(), 5_000)
     return () => {
       stopped = true
       window.clearInterval(timerId)
+      window.removeEventListener('beforeunload', onBeforeUnload)
+      const s = stateRef.current
+      if (s) void unregisterAll(s)
     }
   }, [rendezvousBase])
 
