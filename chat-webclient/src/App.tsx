@@ -48,9 +48,6 @@ function App() {
     stateRef.current = state
   }, [state])
 
-  // Per-circle relay cursor: last server_time returned by GET /v1/messages
-  const relayCursors = useRef<Record<string, number>>({})
-
   // Ref for auto-scrolling the message list
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -145,20 +142,39 @@ function App() {
 
     let stopped = false
 
+    // Cursors are local to this effect instance so React Strict Mode's
+    // mount→cleanup→remount cycle starts each instance with since=0,
+    // guaranteeing the full message history is fetched on every fresh mount.
+    const cursors: Record<string, number> = {}
+
+    // Track which of OUR OWN messages have been confirmed pushed this session.
+    // We only push own messages (others are already in the relay) and skip
+    // already-pushed ones to avoid hammering the server every 5 s.
+    const pushedMsgIds = new Set<string>()
+
     const syncAll = async () => {
       const s = stateRef.current
       if (!s || stopped) return
 
       for (const [circleId, circle] of Object.entries(s.circles)) {
         try {
-          const outgoing = Object.values(s.messages).filter((m) => m.circleId === circleId)
-          try {
-            await pushMessages(base, circleId, outgoing)
-          } catch {
-            /* push failure is non-fatal */
+          // Push only OUR messages not yet confirmed sent this session.
+          const outgoing = Object.values(s.messages).filter(
+            (m) =>
+              m.circleId === circleId &&
+              m.authorNodeId === s.node.nodeId &&
+              !pushedMsgIds.has(m.msgId),
+          )
+          if (outgoing.length > 0) {
+            try {
+              await pushMessages(base, circleId, outgoing)
+              for (const m of outgoing) pushedMsgIds.add(m.msgId)
+            } catch {
+              /* push failure is non-fatal — will retry next cycle */
+            }
           }
 
-          const since = relayCursors.current[circleId] ?? 0
+          const since = cursors[circleId] ?? 0
           const { messages: incoming, serverTime } = await pullMessages(base, circleId, since)
 
           const currentMessages = stateRef.current?.messages ?? {}
@@ -167,7 +183,12 @@ function App() {
             if (currentMessages[msg.msgId]) continue
             if (msg.circleId !== circleId) continue
             const valid = await verifyMessageMac(circle.secretHex, msg)
-            if (!valid) continue
+            if (!valid) {
+              console.warn(
+                `[felund] MAC fail: msg=${msg.msgId.slice(0, 8)} from=${msg.displayName}`,
+              )
+              continue
+            }
             newMsgs.push(msg)
           }
 
@@ -185,11 +206,14 @@ function App() {
             setTimeout(() => setSyncStatus(''), 3_000)
           }
 
-          if (serverTime > since) {
-            relayCursors.current[circleId] = serverTime
+          // Use serverTime - 1 so messages stored in the same server-second as
+          // the pull are still visible next cycle (caught by stored_at > since).
+          // msgId dedup above prevents showing them twice.
+          if (serverTime > 0) {
+            cursors[circleId] = Math.max(since, serverTime - 1)
           }
-        } catch {
-          /* per-circle errors are non-fatal */
+        } catch (err) {
+          console.warn(`[felund] sync error circle=${circleId.slice(0, 8)}:`, err)
         }
       }
 
