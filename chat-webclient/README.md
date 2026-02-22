@@ -1,73 +1,77 @@
-# React + TypeScript + Vite
+# felundchat — web client
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A browser-based chat client for felund circles.  It uses the same invite
+code format and HMAC-signed message protocol as the Python TUI client, so
+users on both clients can share circles and exchange messages seamlessly.
 
-Currently, two official plugins are available:
+## What it is
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- **Full chat client** — not a monitor or debug UI.  Create circles, join via
+  invite code, send and receive messages, switch channels.
+- **Relay-only** — browsers cannot open raw TCP sockets, so the web client
+  syncs exclusively through the relay API (`POST / GET /v1/messages`).  No
+  direct peer-to-peer connectivity.
+- **PWA-capable** — can be installed to the home screen on mobile or desktop.
+- **Terminal aesthetic** — deliberately styled to match the Python TUI layout:
+  full-screen, monospace font, sidebar + message log + input bar.
 
-## React Compiler
+## How it talks to the backend
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```
+Browser ──── HTTPS ────► Relay API  (POST /v1/messages  push)
+                                    (GET  /v1/messages  pull, every 5 s)
+                         Rendezvous (POST /v1/register   presence)
+                                    (GET  /v1/peers      peer count)
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+The relay server stores messages for up to 30 days.  Integrity is guaranteed
+by HMAC-SHA256 — the server never sees the circle secret and cannot forge
+messages.  The browser verifies every pulled message before displaying it.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Development
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cd chat-webclient
+cp .env.example .env        # set VITE_FELUND_API_BASE=http://localhost:8000
+npm install
+npm run dev
 ```
+
+## Production build
+
+```bash
+npm run build               # outputs to dist/
+```
+
+Deploy the `dist/` folder to any static host (Netlify, Cloudflare Pages,
+nginx, etc.).  Set `VITE_FELUND_API_BASE` in your hosting environment's
+environment variable settings before building.
+
+## Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `VITE_FELUND_API_BASE` | Base URL of the relay/rendezvous API server. Leave blank to start with relay disabled — users can configure it in Settings (F1). |
+
+## Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `F1` | Open Settings (display name, relay URL) |
+| `F2` | Show invite code for the active circle |
+| `Escape` | Close modal |
+
+## Slash commands
+
+Type in the message bar:
+
+| Command | Action |
+|---------|--------|
+| `/invite` | Show invite code |
+| `/join <code>` | Join a circle via invite code |
+| `/name <name>` | Change display name |
+| `/channel create <name>` | Create a channel |
+| `/channel switch <name>` | Switch active channel |
+| `/channels` | List channels |
+| `/settings` | Open settings modal |
+| `/help` | List all commands |

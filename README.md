@@ -1,6 +1,7 @@
 # felund-core
 
-Simple peer-to-peer group chat over direct connections with gossip-based sync.
+Peer-to-peer group chat with gossip-based sync, optional relay for
+browser clients, and a terminal UI + web client.
 
 ## Requirements
 
@@ -16,33 +17,21 @@ cd felund-core
 bash setup.sh
 ```
 
-This creates a `.venv/` at the project root and installs all dependencies for both
-the chat client and the optional API service.
+This creates a `.venv/` at the project root and installs all dependencies for
+both the chat client and the optional API service.
 
 State is stored at `~/.felundchat/state.json`.
 
-## Running the TUI
+## Clients
+
+### Python TUI
 
 ```bash
 .venv/bin/python chat/felundchat.py
 ```
 
-This launches the panel-based terminal UI (default). You can also be explicit:
-
-```bash
-.venv/bin/python chat/felundchat.py tui
-```
-
-### First run — Setup wizard
-
-If no circles exist you are taken through a short wizard:
-
-1. Choose **Host** or **Join**
-2. Enter your display name and listen port (default: 9999)
-3. **Host**: a felund invite code is generated — share it with your friend
-4. **Join**: paste the felund code from the host
-
-### TUI layout
+Launches the panel-based terminal UI.  On first run a short wizard guides
+you through creating or joining a circle.
 
 ```
 ┌─ felundchat ─────────────────────────────────────────────────────┐
@@ -53,30 +42,26 @@ If no circles exist you are taken through a short wizard:
 │ ● mygroup        │ [10:35] you: what's up                        │
 │   #general ←     │                                                │
 │   #random        │                                                │
-│                  │                                                │
 ├──────────────────┴────────────────────────────────────────────────┤
 │ > _                                                               │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-Click a channel in the sidebar to switch context. The header shows live peer count.
-
-### TUI keyboard shortcuts
+#### TUI keyboard shortcuts
 
 | Key | Action |
 |-----|--------|
+| `F3` | Settings (display name, relay URL) |
+| `F2` | Show invite code for active circle |
+| `F1` | Help |
 | `ctrl+q` | Quit |
-| `ctrl+i` | Show invite code for active circle |
-| `escape` | Re-focus input bar |
+| `Escape` | Re-focus input bar |
 
-### TUI slash commands
-
-Type these in the input bar:
+#### TUI slash commands
 
 | Command | Action |
 |---------|--------|
-| `/help` | List all commands |
-| `/help <command>` | Show detailed help for one command |
+| `/help [command]` | List all commands or detail one |
 | `/invite` | Show invite code for the active circle |
 | `/join <code>` | Join a new circle via felund code |
 | `/circles` | List joined circles |
@@ -85,17 +70,70 @@ Type these in the input bar:
 | `/channel join <name> [key]` | Join a channel |
 | `/channel switch <name>` | Switch active channel |
 | `/channel leave <name>` | Leave a channel |
-| `/channel requests <name>` | Show pending access requests (owner only) |
-| `/channel approve <name> <node_id>` | Approve a pending request (owner only) |
-| `/who [channel]` | Show members in the active (or named) channel |
-| `/name` | Show your current display name |
-| `/name <new_name>` | Update display name and sync to peers |
+| `/who [channel]` | Show members |
+| `/name [new_name]` | Show or update display name |
+| `/settings` | Open settings modal |
 | `/debug` | Toggle gossip debug log |
 | `/quit` | Exit |
 
-## CLI subcommands
+### Web client
 
-All legacy CLI commands still work:
+A full chat client that runs in the browser.  Uses the same invite codes and
+message format as the Python TUI — users on both clients can share circles.
+See [`chat-webclient/README.md`](chat-webclient/README.md) for setup.
+
+```bash
+cd chat-webclient
+cp .env.example .env   # set VITE_FELUND_API_BASE
+npm install && npm run dev
+```
+
+## Relay / rendezvous server
+
+An API server handles two concerns:
+
+- **Rendezvous** — peers register their endpoints; others look them up to
+  attempt direct connections.
+- **Relay** — a simple store-and-forward message bus used by browser clients
+  (which cannot open raw TCP connections) and useful as a fallback when
+  direct peer connections are not possible.
+
+### PHP server (recommended for shared hosting)
+
+Requires PHP 8.1+ with `pdo_sqlite`.  No other dependencies.
+
+```bash
+# Development (built-in server)
+php -S 0.0.0.0:8000 api/php/rendezvous.php
+
+# Production — copy api/php/ into your document root.
+# Apache .htaccess and an nginx config are included.
+```
+
+### Python/FastAPI server (alternative, rendezvous-only)
+
+Requires the `api/` virtualenv.
+
+```bash
+.venv/bin/uvicorn api.rendezvous:app --reload
+```
+
+Note: the FastAPI server currently implements presence/rendezvous only
+(`/v1/register`, `/v1/peers`, `/v1/health`).  For full relay support
+(`/v1/messages`) use the PHP server.
+
+### Connecting clients to the server
+
+```bash
+# Python TUI — set env var or configure via F3 in the TUI
+export FELUND_API_BASE=http://your-server/api
+.venv/bin/python chat/felundchat.py
+
+# Web client — set in chat-webclient/.env before npm run dev / build
+VITE_FELUND_API_BASE=http://your-server/api
+```
+
+## CLI subcommands
 
 ```bash
 # Initialize local node settings
@@ -107,9 +145,6 @@ All legacy CLI commands still work:
 # Join via single invite code
 .venv/bin/python chat/felundchat.py join --code <felund_code>
 
-# Legacy join (still supported)
-.venv/bin/python chat/felundchat.py join --secret <hex> --peer <host:port>
-
 # Start gossip service (headless)
 .venv/bin/python chat/felundchat.py run
 
@@ -120,66 +155,97 @@ All legacy CLI commands still work:
 .venv/bin/python chat/felundchat.py inbox --circle-id <id> --limit 50
 
 # List circles or peers in a circle
-.venv/bin/python chat/felundchat.py peers
-.venv/bin/python chat/felundchat.py peers --circle-id <id>
+.venv/bin/python chat/felundchat.py peers [--circle-id <id>]
 ```
 
-## Optional API-assisted discovery
+## Topology examples
 
-An optional rendezvous API is included for internet-style peer discovery.
+### LAN / same network
 
-Start the API:
+Both nodes on the same local network.  No relay needed, no port forwarding
+needed.  Direct TCP gossip.
 
-```bash
-.venv/bin/uvicorn api.rendezvous:app --reload
+```
+Alice (192.168.1.10:9999)  ◄──────────►  Bob (192.168.1.11:9999)
 ```
 
-Enable in the chat client:
+### Internet with port forwarding
 
-```bash
-export FELUND_API_BASE=http://127.0.0.1:8000
-.venv/bin/python chat/felundchat.py
+One node has a reachable public port.  The other initiates the connection.
+The host shares their public IP:port in the invite code.
+
+```
+Alice (1.2.3.4:9999, port-forwarded)  ◄──────────►  Bob (behind NAT)
 ```
 
-Windows PowerShell:
+### Internet via relay (browser or NAT-to-NAT)
 
-```powershell
-$env:FELUND_API_BASE = "http://127.0.0.1:8000"
-.venv\Scripts\python chat\felundchat.py
+Neither peer can reach the other directly, or one is a browser client.
+Both push and pull messages through the relay API.
+
 ```
+Alice (Python TUI)  ──► relay server ◄──  Bob (browser)
+                              │
+                    (HMAC-authenticated,
+                     server cannot read
+                     or forge messages)
+```
+
+The relay is store-and-forward: messages are retained for up to 30 days.
+Peers pull at 5-second intervals.
+
+## Trust and threat model
+
+- **Authentication** — every message carries an HMAC-SHA256 MAC derived from
+  the circle secret.  Any tampered or forged message is rejected by recipients.
+- **Confidentiality** — messages are **not encrypted** in the current version.
+  The relay server and any network observer can read message content.
+  Treat felund as "tamper-evident chat," not "end-to-end encrypted chat."
+- **Circle membership** — anyone who obtains the invite code (which embeds the
+  circle secret) can join the circle and read all messages.  Protect invite
+  codes accordingly.
+- **Relay trust** — the relay server is untrusted.  It stores opaque payloads
+  and cannot forge valid MACs without the circle secret.
 
 ## Package structure
 
 ```
 felund-core/
 ├── setup.sh                  # One-shot venv + dependency install
-├── .venv/                    # Shared virtual environment
+├── test_relay.py             # Integration test for the relay API
+├── .env.example              # Environment variable reference
 ├── api/
-│   ├── rendezvous.py         # FastAPI rendezvous service (optional)
+│   ├── php/
+│   │   ├── rendezvous.php    # PHP relay + rendezvous server (recommended)
+│   │   ├── .htaccess         # Apache rewrite rules
+│   │   └── nginx.conf        # nginx config example
+│   ├── rendezvous.py         # FastAPI rendezvous server (presence only)
 │   └── requirements.txt
-└── chat/
-    ├── felundchat.py         # Entry-point shim
-    ├── requirements.txt
-    └── felundchat/
-        ├── config.py         # Constants (state file path, limits)
-        ├── models.py         # Dataclasses: State, Circle, Peer, Channel, ChatMessage
-        ├── crypto.py         # HMAC MAC generation and SHA-256 helpers
-        ├── invite.py         # felund code encode/decode
-        ├── transport.py      # TCP framing, IP detection
-        ├── persistence.py    # load_state / save_state (JSON)
-        ├── gossip.py         # GossipNode — TCP server + gossip loop
-        ├── channel_sync.py   # Channel event messages and apply logic
-        ├── rendezvous_client.py  # Optional API peer discovery
-        ├── chat.py           # Circle/channel management helpers
-        ├── cli.py            # argparse subcommands
-        └── tui.py            # Textual panel TUI
+├── chat/
+│   ├── felundchat.py         # Entry-point shim
+│   ├── requirements.txt
+│   └── felundchat/
+│       ├── config.py         # Constants (state file path, limits)
+│       ├── models.py         # Dataclasses: State, Circle, Peer, Channel, ChatMessage
+│       ├── crypto.py         # HMAC MAC generation and SHA-256 helpers
+│       ├── invite.py         # felund code encode/decode
+│       ├── transport.py      # TCP framing, IP detection
+│       ├── persistence.py    # load_state / save_state (JSON)
+│       ├── gossip.py         # GossipNode — TCP server + gossip loop
+│       ├── channel_sync.py   # Channel event messages and apply logic
+│       ├── rendezvous_client.py  # Relay + rendezvous API client
+│       ├── chat.py           # Circle/channel management helpers
+│       ├── cli.py            # argparse subcommands
+│       └── tui/              # Textual panel TUI
+└── chat-webclient/           # React + TypeScript browser client
 ```
 
 ## Notes
 
 - The app auto-detects your local IP for peer sharing.
 - Keep at least one node running so gossip can propagate messages.
-- For cross-network use, ensure the chosen port is reachable from the internet.
+- For cross-network direct connections, ensure the chosen port is reachable
+  from the internet.
 - Sync debug logs are local-only and off by default.
 
 ## Docs

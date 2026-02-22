@@ -249,31 +249,30 @@ function route_register(): never
         ':exp'  => $expires_at,
     ]);
 
-    // Best-effort observed endpoint (behind a proxy, X-Forwarded-For takes priority)
-    $observed_endpoint = null;
+    // Best-effort observed host (behind a proxy, X-Forwarded-For takes priority).
+    // We return only the IP address — NOT the source port.  The source port of
+    // an HTTP request is an ephemeral port chosen by the OS and has nothing to
+    // do with the peer's listen port, so including it would produce misleading
+    // endpoint hints.  Clients that want to advertise their listen port should
+    // include it in the 'endpoints' array of the register request.
+    $observed_host = null;
     $remote_ip = trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']
         ?? $_SERVER['HTTP_X_REAL_IP']
         ?? $_SERVER['REMOTE_ADDR']
         ?? '')[0]);
 
     if ($remote_ip !== '') {
-        $observed_endpoint = [
-            'transport' => 'tcp',
-            'host'      => $remote_ip,
-            'port'      => (int) ($_SERVER['REMOTE_PORT'] ?? 0) ?: 0,
-            'family'    => str_contains($remote_ip, ':') ? 'ipv6' : 'ipv4',
-            'nat'       => 'unknown',
+        $observed_host = [
+            'host'   => $remote_ip,
+            'family' => str_contains($remote_ip, ':') ? 'ipv6' : 'ipv4',
         ];
-        if ($observed_endpoint['port'] === 0) {
-            unset($observed_endpoint['port']);
-        }
     }
 
     json_response([
-        'ok'                => true,
-        'server_time'       => $now,
-        'expires_at'        => $expires_at,
-        'observed_endpoint' => $observed_endpoint,
+        'ok'            => true,
+        'server_time'   => $now,
+        'expires_at'    => $expires_at,
+        'observed_host' => $observed_host,
     ]);
 }
 
