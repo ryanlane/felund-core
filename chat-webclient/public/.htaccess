@@ -1,0 +1,36 @@
+# Felund web client — Apache static hosting rules
+# Vite copies everything in public/ into dist/ at build time.
+
+# ── Cache control ─────────────────────────────────────────────────────────────
+# Hashed asset bundles (JS, CSS, images) are safe to cache forever because
+# any change produces a new filename.  index.html and the PWA service-worker
+# files must never be stale-cached, or users won't pick up updates.
+
+<IfModule mod_expires.c>
+    ExpiresActive On
+
+    # Default: no cache
+    ExpiresDefault "access plus 0 seconds"
+
+    # Hashed bundles in /assets/ — cache for 1 year
+    <FilesMatch "\.(js|css|woff2?|ttf|eot|svg|png|webp|ico)$">
+        ExpiresDefault "access plus 1 year"
+        Header append Cache-Control "public, immutable"
+    </FilesMatch>
+</IfModule>
+
+# Force revalidation of the HTML entry point and service-worker scripts,
+# even if the browser or a CDN has cached them.
+<FilesMatch "^(index\.html|sw\.js|workbox-[^.]+\.js)$">
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
+    Header set Pragma "no-cache"
+    Header set Expires "0"
+</FilesMatch>
+
+# ── MIME types (belt-and-suspenders for hosts with minimal mime.types) ────────
+<IfModule mod_mime.c>
+    AddType application/javascript    .js .mjs
+    AddType text/css                  .css
+    AddType image/svg+xml             .svg
+    AddType application/manifest+json .webmanifest
+</IfModule>

@@ -284,11 +284,7 @@ class ChatScreen(CommandsMixin, Screen):
             self._update_title()
 
     def _process_control_events(self) -> None:
-        if not self._current_circle_id:
-            return
         for m in list(self.state.messages.values()):
-            if m.circle_id != self._current_circle_id:
-                continue
             if m.channel_id != CONTROL_CHANNEL_ID:
                 continue
             if m.msg_id in self._seen:
@@ -296,12 +292,12 @@ class ChatScreen(CommandsMixin, Screen):
             self._seen.add(m.msg_id)
             event = parse_channel_event(m.text)
             if event:
-                apply_channel_event(self.state, self._current_circle_id, event)
+                apply_channel_event(self.state, m.circle_id, event)
                 save_state(self.state)
                 continue
             name_event = parse_circle_name_event(m.text)
             if name_event:
-                changed = apply_circle_name_event(self.state, self._current_circle_id, name_event)
+                changed = apply_circle_name_event(self.state, m.circle_id, name_event)
                 if changed:
                     save_state(self.state)
                     self._refresh_sidebar()

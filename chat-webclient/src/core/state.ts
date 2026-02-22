@@ -1,7 +1,7 @@
 import { openDB } from 'idb'
 
 import { hmacHex, randomHex, sha256Hex } from './crypto'
-import type { ChatMessage, Channel, Circle, State } from './models'
+import type { AccessMode, ChatMessage, Channel, Circle, State } from './models'
 import { nowTs } from './models'
 
 const DB_NAME = 'felundchat-web'
@@ -153,6 +153,67 @@ export const sendMessage = async (state: State, text: string): Promise<ChatMessa
   message.mac = await hmacHex(circle.secretHex, macPayload)
   state.messages[message.msgId] = message
   return message
+}
+
+const CONTROL_CHANNEL_ID = '__control'
+
+/**
+ * Parse and apply CHANNEL_EVT / CIRCLE_NAME_EVT control messages.
+ *
+ * Callers must pass a state whose `channels` and `circles` dicts are already
+ * shallow-copied from the previous state (so this function can safely replace
+ * per-circle channel dicts or circle objects with fresh copies).
+ *
+ * Returns true if any channel or circle name was changed.
+ */
+export const applyControlEvents = (state: State, msgs: ChatMessage[]): boolean => {
+  let changed = false
+  for (const msg of msgs) {
+    if (msg.channelId !== CONTROL_CHANNEL_ID) continue
+    let evt: unknown
+    try {
+      evt = JSON.parse(msg.text)
+    } catch {
+      continue
+    }
+    if (!evt || typeof evt !== 'object') continue
+    const e = evt as Record<string, unknown>
+
+    if (e['t'] === 'CHANNEL_EVT' && e['op'] === 'create') {
+      const channelId = String(e['channel_id'] ?? '')
+        .trim()
+        .toLowerCase()
+      // Mirror Python _valid_channel_id: no __ prefix, alphanumeric + - _
+      if (!channelId || channelId.startsWith('__') || channelId.length > 32) continue
+      if (!/^[a-z0-9_-]+$/.test(channelId)) continue
+      if (!state.channels[msg.circleId]?.[channelId]) {
+        // Shallow-copy the per-circle dict before mutating it
+        state.channels[msg.circleId] = { ...(state.channels[msg.circleId] ?? {}) }
+        const accessModeRaw = String(e['access_mode'] ?? '')
+        const accessMode: AccessMode =
+          accessModeRaw === 'key' ? 'key' : accessModeRaw === 'invite' ? 'invite' : 'public'
+        state.channels[msg.circleId][channelId] = {
+          channelId,
+          circleId: msg.circleId,
+          accessMode,
+          createdBy: String(e['actor_node_id'] ?? e['created_by'] ?? ''),
+          createdTs: typeof e['created_ts'] === 'number' ? e['created_ts'] : nowTs(),
+        }
+        changed = true
+      }
+    }
+
+    if (e['t'] === 'CIRCLE_NAME_EVT') {
+      const name = String(e['name'] ?? '').trim().slice(0, 40)
+      const circle = state.circles[msg.circleId]
+      if (name && circle && circle.name !== name) {
+        // Shallow-copy the circle object before mutating name
+        state.circles[msg.circleId] = { ...circle, name }
+        changed = true
+      }
+    }
+  }
+  return changed
 }
 
 export const visibleMessages = (state: State): ChatMessage[] => {

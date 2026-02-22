@@ -219,7 +219,7 @@ def apply_circle_name_event(state: State, circle_id: str, event: Dict[str, Any])
     name = str(event.get("name", "")).strip()[:40]
     if not name:
         return False
-    if circle.name:  # already named locally — don't overwrite
+    if circle.name == name:  # unchanged
         return False
     circle.name = name
     return True

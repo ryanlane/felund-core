@@ -1,33 +1,89 @@
 <?php
 /**
- * Felund Rendezvous API — PHP / SQLite single-file implementation.
+ * Felund Rendezvous API — PHP single-file implementation (SQLite or MySQL).
  *
  * Identical API contract to api/rendezvous.py (Python/FastAPI).
  *
  * Requirements
  *   PHP 8.1+  (match expressions, readonly properties, first-class callables)
- *   pdo_sqlite extension (enabled by default on most hosts)
+ *   pdo_sqlite extension  — for SQLite (enabled by default on most hosts)
+ *   pdo_mysql extension   — for MySQL / MariaDB (opt-in via .env)
  *
  * Quick-start
- *   # Built-in server (dev / LAN)
+ *   cp .env.example .env    # edit DB_DRIVER and credentials if using MySQL
  *   php -S 0.0.0.0:8000 rendezvous.php
  *
  *   # Apache  — copy api/php/ into your document root, .htaccess is included.
  *   # nginx   — see nginx.conf in this directory.
  *
- * The SQLite database is written to DB_PATH below.
- * Make sure that path is writable by the web-server process and is NOT
- * directly accessible via HTTP (see .htaccess / nginx.conf).
+ * Configuration is read from api/php/.env (see .env.example).
+ * The SQLite database path defaults to data/felund_rendezvous.sqlite and
+ * must be writable by the web-server process and NOT accessible via HTTP
+ * (the .htaccess / nginx.conf already block it).
  */
 
 declare(strict_types=1);
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
-const VERSION       = '0.1.0';
-const DB_PATH       = __DIR__ . '/data/felund_rendezvous.sqlite';
-const MAX_ENDPOINTS = 16;
-const MAX_LIMIT     = 200;
+const VERSION            = '0.1.0';
+const DB_PATH_DEFAULT    = __DIR__ . '/data/felund_rendezvous.sqlite';
+const MAX_ENDPOINTS      = 16;
+const MAX_LIMIT          = 200;
+
+/**
+ * Load key=value pairs from api/php/.env into $_ENV / putenv().
+ * Already-set environment variables take precedence (so hosting-level env vars win).
+ * Lines starting with # are comments; bare = signs without a value are allowed.
+ */
+function load_env(): void
+{
+    $path = __DIR__ . '/.env';
+    if (!is_file($path)) {
+        return;
+    }
+    foreach (file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+        $line = trim($line);
+        if ($line === '' || str_starts_with($line, '#')) {
+            continue;
+        }
+        $pos = strpos($line, '=');
+        if ($pos === false) {
+            continue;
+        }
+        $key   = trim(substr($line, 0, $pos));
+        $value = trim(substr($line, $pos + 1));
+        // Strip optional surrounding double-quotes
+        if (strlen($value) >= 2 && $value[0] === '"' && $value[-1] === '"') {
+            $value = substr($value, 1, -1);
+        }
+        // Environment variables already in the environment take precedence
+        if (getenv($key) === false) {
+            putenv("$key=$value");
+            $_ENV[$key] = $value;
+        }
+    }
+}
+
+load_env();
+
+/** Returns the configured DB driver: 'sqlite' (default) or 'mysql'. */
+function db_driver(): string
+{
+    return strtolower((string) (getenv('DB_DRIVER') ?: 'sqlite'));
+}
+
+/** Driver-specific INSERT-or-replace prefix. */
+function sql_upsert(string $table): string
+{
+    return db_driver() === 'mysql' ? "REPLACE INTO $table" : "INSERT OR REPLACE INTO $table";
+}
+
+/** Driver-specific INSERT-or-ignore prefix. */
+function sql_insert_ignore(string $table): string
+{
+    return db_driver() === 'mysql' ? "INSERT IGNORE INTO $table" : "INSERT OR IGNORE INTO $table";
+}
 
 // ── Database ──────────────────────────────────────────────────────────────────
 
@@ -37,13 +93,27 @@ function db(): PDO
     if ($pdo !== null) {
         return $pdo;
     }
+    try {
+        $pdo = db_driver() === 'mysql' ? db_connect_mysql() : db_connect_sqlite();
+    } catch (\PDOException $e) {
+        // Return a structured error instead of a raw 500 so operators can diagnose.
+        // The message is intentionally vague to avoid leaking credentials in responses;
+        // the full exception is logged by PHP's default error handler.
+        error_log('[felund] DB connection failed: ' . $e->getMessage());
+        http_error('Database unavailable — check server logs and configuration', 503);
+    }
+    return $pdo;
+}
 
-    $dir = dirname(DB_PATH);
+function db_connect_sqlite(): PDO
+{
+    $db_path = (string) (getenv('DB_PATH') ?: DB_PATH_DEFAULT);
+    $dir     = dirname($db_path);
     if (!is_dir($dir) && !mkdir($dir, 0750, true)) {
         http_error('Cannot create data directory', 500);
     }
 
-    $pdo = new PDO('sqlite:' . DB_PATH);
+    $pdo = new PDO('sqlite:' . $db_path);
     $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
 
@@ -84,7 +154,7 @@ function db(): PDO
         stored_at   INTEGER NOT NULL DEFAULT 0,
         expires_at  INTEGER NOT NULL
     )');
-    // Migration: add stored_at to pre-existing databases.
+    // Migration: add stored_at to pre-existing SQLite databases.
     try {
         $pdo->exec('ALTER TABLE relay_messages ADD COLUMN stored_at INTEGER NOT NULL DEFAULT 0');
         $pdo->exec('UPDATE relay_messages SET stored_at = created_ts WHERE stored_at = 0');
@@ -93,6 +163,27 @@ function db(): PDO
     }
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_rmsg_stored ON relay_messages (circle_hint, stored_at)');
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_rmsg_exp    ON relay_messages (expires_at)');
+
+    return $pdo;
+}
+
+function db_connect_mysql(): PDO
+{
+    $host   = (string) (getenv('MYSQL_HOST')     ?: '127.0.0.1');
+    $port   = (int)    (getenv('MYSQL_PORT')     ?: 3306);
+    $dbname = (string) (getenv('MYSQL_DBNAME')   ?: 'felund_data');
+    $user   = (string) (getenv('MYSQL_USER')     ?: '');
+    $pass   = (string) (getenv('MYSQL_PASSWORD') ?: '');
+
+    $dsn = "mysql:host=$host;port=$port;dbname=$dbname;charset=utf8mb4";
+    $pdo = new PDO($dsn, $user, $pass, [
+        PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    ]);
+
+    // Tables must be pre-created by running api/php/sql/02_schema.sql.
+    // The runtime user only needs SELECT, INSERT, UPDATE, DELETE — no DDL
+    // privileges are required or requested here.
 
     return $pdo;
 }
@@ -236,7 +327,7 @@ function route_register(): never
     db_prune($db, $now);
 
     $stmt = $db->prepare(
-        'INSERT OR REPLACE INTO presence
+        sql_upsert('presence') . '
          (circle_hint, node_id, endpoints, capabilities, observed_at, expires_at)
          VALUES (:ch, :nid, :ep, :caps, :obs, :exp)'
     );
@@ -293,20 +384,20 @@ function route_peers(): never
 
     if ($exclude_node !== null) {
         $stmt = $db->prepare(
-            'SELECT * FROM presence
+            "SELECT * FROM presence
              WHERE circle_hint = :ch AND expires_at > :now AND node_id != :excl
              ORDER BY observed_at DESC
-             LIMIT :lim'
+             LIMIT $limit"
         );
-        $stmt->execute([':ch' => $circle_hint, ':now' => $now, ':excl' => $exclude_node, ':lim' => $limit]);
+        $stmt->execute([':ch' => $circle_hint, ':now' => $now, ':excl' => $exclude_node]);
     } else {
         $stmt = $db->prepare(
-            'SELECT * FROM presence
+            "SELECT * FROM presence
              WHERE circle_hint = :ch AND expires_at > :now
              ORDER BY observed_at DESC
-             LIMIT :lim'
+             LIMIT $limit"
         );
-        $stmt->execute([':ch' => $circle_hint, ':now' => $now, ':lim' => $limit]);
+        $stmt->execute([':ch' => $circle_hint, ':now' => $now]);
     }
 
     $peers = array_map(
@@ -356,7 +447,7 @@ function route_messages_post(): never
     db_prune($db, $now);
 
     $stmt    = $db->prepare(
-        'INSERT OR IGNORE INTO relay_messages (msg_id, circle_hint, payload, created_ts, stored_at, expires_at)
+        sql_insert_ignore('relay_messages') . ' (msg_id, circle_hint, payload, created_ts, stored_at, expires_at)
          VALUES (:mid, :ch, :payload, :ts, :stored, :exp)'
     );
     $stored = 0;
@@ -409,14 +500,14 @@ function route_messages_get(): never
     $db   = db();
 
     $stmt = $db->prepare(
-        'SELECT payload FROM relay_messages
+        "SELECT payload FROM relay_messages
          WHERE  circle_hint = :ch
            AND  stored_at   > :since
            AND  expires_at  > :now
          ORDER BY stored_at ASC, msg_id ASC
-         LIMIT :lim'
+         LIMIT $limit"
     );
-    $stmt->execute([':ch' => $circle_hint, ':since' => $since, ':now' => $now, ':lim' => $limit]);
+    $stmt->execute([':ch' => $circle_hint, ':since' => $since, ':now' => $now]);
 
     $messages = [];
     while ($row = $stmt->fetch()) {

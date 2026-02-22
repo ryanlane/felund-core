@@ -4,6 +4,7 @@ import './App.css'
 import { parseInviteCode, makeInviteCode } from './core/invite'
 import type { ChatMessage, State } from './core/models'
 import {
+  applyControlEvents,
   createChannel,
   createCircle,
   joinCircle,
@@ -178,10 +179,17 @@ function App() {
           if (newMsgs.length > 0 && !stopped) {
             setState((prev) => {
               if (!prev) return prev
-              const next = { ...prev, messages: { ...prev.messages } }
+              const next = {
+                ...prev,
+                messages: { ...prev.messages },
+                // Shallow-copy so applyControlEvents can safely replace per-circle dicts
+                channels: { ...prev.channels },
+                circles: { ...prev.circles },
+              }
               for (const msg of newMsgs) {
                 next.messages[msg.msgId] = msg
               }
+              applyControlEvents(next, newMsgs)
               void saveState(next)
               return next
             })

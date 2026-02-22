@@ -34,12 +34,12 @@ Launches the panel-based terminal UI.  On first run a short wizard guides
 you through creating or joining a circle.
 
 ```
-┌─ felundchat ─────────────────────────────────────────────────────┐
-│ node: a3f8b2 | #general | 2 peers                     ctrl+q=quit│
+┌─ felundchat ──────────────────────────────────────────────────────┐
+│ node: a3f8b2 | #general | 2 peers                     ctrl+q=quit │
 ├──────────────────┬────────────────────────────────────────────────┤
 │ Circles          │ [10:32] alice: hey everyone                    │
-│ ────────────────  │ [10:33] bob: yo                               │
-│ ● mygroup        │ [10:35] you: what's up                        │
+│ ──────────────── │ [10:33] bob: yo                                │
+│ ● mygroup        │ [10:35] you: what's up                         │
 │   #general ←     │                                                │
 │   #random        │                                                │
 ├──────────────────┴────────────────────────────────────────────────┤
