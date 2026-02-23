@@ -54,40 +54,44 @@ Track each item as `- [ ]` (pending), `- [x]` (done), or `- [-]` (skipped/deferr
 
 ### Service
 
-- [ ] Choose stack for companion WS service: `api/relay_ws.py` (uvicorn + websockets) or `api/relay_ws.js` (Node.js)
-- [ ] Implement `POST /v1/relay/session` endpoint
-  - Body: `node_id`, `target_node_id`, `circle_hint`, `ttl_s`
-  - Response: `session_id`, `token`, `relay_url`, `expires_at`
-  - Token: `HMAC-SHA256(server_secret, session_id || node_id)`
-- [ ] Implement `WebSocket /v1/relay/ws?token=<token>`
-  - Validate token on connect
-  - Accept `FRAME` envelopes: `{t, session_id, seq, payload_b64}`
-  - Forward payload to the other session participant
-  - Send `ACK {t, seq}` back to sender
-  - Enforce max frame size (16 KB) and idle timeout (30s)
-- [ ] Add session cleanup on disconnect or TTL expiry
-- [ ] Add nginx/Apache proxy config for WebSocket upgrade
+- [x] Choose stack: `api/relay_ws.py` — Python aiohttp (handles HTTP + WebSocket in one process)
+- [x] Implement `POST /v1/register`, `GET /v1/peers`, `DELETE /v1/register` (full presence layer, API-compatible with PHP)
+- [x] Implement `POST /v1/messages` — store in SQLite + broadcast to live WS subscribers
+- [x] Implement `GET /v1/messages` — retrieve with `since` cursor (same as PHP)
+- [x] Implement `WebSocket /v1/relay/ws?circle_hint=&node_id=`
+  - On connect: send buffered messages from last 120 s so client catches up immediately
+  - On new message push: broadcast `{"t": "MESSAGES", "messages": [...]}` to all room subscribers
+  - Keepalive: `{"t": "PING"}` every 15 s; client responds `{"t": "PONG"}`
+- [x] SQLite storage (same schema as PHP: `presence` + `relay_messages` tables)
+- [x] CORS middleware on all HTTP responses
+- [x] Create `api/relay_requirements.txt` (`aiohttp>=3.9`, `aiosqlite>=0.19`)
+- [-] nginx/Apache proxy config for WebSocket upgrade — deferred; document in README
 
 ### Python client
 
-- [ ] Add `open_relay_ws_session(api_base, state, circle_id, target_node_id)` to [chat/felundchat/rendezvous_client.py](../chat/felundchat/rendezvous_client.py)
-- [ ] Run existing gossip frame protocol over the WebSocket tunnel (send/recv frames)
-- [ ] Implement reconnect with exponential backoff on WS disconnect
-- [ ] Fall through to HTTP store-and-forward if WS session creation fails
+- [-] Push messages to WS relay from Python TUI — deferred; Python TUI uses direct TCP gossip; relay is primarily for web clients in Phase 2
+- [-] WS-based gossip tunnel for Python TUI — deferred to Phase 2.5/3; TCP gossip already works
 
 ### Web client
 
-- [ ] Update [chat-webclient/src/network/relay.ts](../chat-webclient/src/network/relay.ts) to attempt WS relay before HTTP poll
-- [ ] Implement `RelayWebSocket` class: connect, send frame, receive frame, reconnect
-- [ ] Preserve HTTP poll as explicit fallback path
-- [ ] Surface connection state in UI (`connecting` / `live` / `polling` / `offline`)
+- [x] Add `openRelayWS(base, circleId, secretHex, nodeId, onMessages, onStatus)` to [chat-webclient/src/network/relay.ts](../chat-webclient/src/network/relay.ts)
+  - Decrypts incoming messages inline (reuses `fromWire`)
+  - Auto-reconnects on close (5 s backoff)
+  - Returns cleanup function for React `useEffect`
+- [x] Export `WsStatus` type (`'connecting' | 'live' | 'closed'`)
+- [x] Add WS subscription `useEffect` to [chat-webclient/src/App.tsx](../chat-webclient/src/App.tsx)
+  - One WS connection per circle; re-established when circles or rendezvousBase change
+  - New messages merged into state immediately (same path as HTTP pull)
+  - Falls back to HTTP poll automatically if WS unavailable
+- [x] Surface connection state in header: `◦ live` (WS connected) vs `○ poll` (HTTP-only)
+- [x] HTTP poll kept as fallback (still runs every 5 s)
 
 ### Verification
 
-- [ ] Two clients exchange a message via WS relay; round-trip latency < 500ms
-- [ ] Client sleep/wake re-establishes WS session automatically
-- [ ] HTTP poll path still works when WS endpoint is absent (e.g. dev server)
-- [ ] Oversized frame (> 16 KB) is rejected by relay
+- [ ] Web client shows `◦ live` when WS relay is reachable
+- [ ] Send message from Python TUI; web client receives it < 500 ms (via HTTP push → WS broadcast)
+- [ ] Kill WS relay; web client falls back to HTTP poll (shows `○ poll`); WS reconnects when relay restarts
+- [ ] HTTP poll path works when pointed at PHP relay (WS unavailable — stays `○ poll`)
 
 ---
 

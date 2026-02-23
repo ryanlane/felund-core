@@ -21,7 +21,8 @@ import {
   registerPresence,
   unregisterPresence,
 } from './network/rendezvous'
-import { pushMessages, pullMessages } from './network/relay'
+import { pushMessages, pullMessages, openRelayWS } from './network/relay'
+import type { WsStatus } from './network/relay'
 
 const formatTime = (ts: number): string => {
   const d = new Date(ts * 1000)
@@ -42,6 +43,8 @@ function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [showInvite, setShowInvite] = useState(false)
   const [inviteCopied, setInviteCopied] = useState(false)
+  const [wsLive, setWsLive] = useState(false)
+  const wsLiveCountRef = useRef(0)
 
   // Keep a ref to the latest state so polling closures always see fresh data
   const stateRef = useRef<State | null>(null)
@@ -233,6 +236,65 @@ function App() {
       if (s) void unregisterAll(s)
     }
   }, [rendezvousBase])
+
+  // ── WebSocket relay — real-time push ──────────────────────────────────────
+  // One WS connection per circle; auto-reconnects on close.
+  // On connect the relay immediately delivers messages buffered in the last 2
+  // minutes so the client doesn't need to HTTP-poll to catch up.
+
+  const circlesKey = Object.keys(state?.circles ?? {}).sort().join(',')
+
+  useEffect(() => {
+    const base = normalizeRendezvousBase(rendezvousBase)
+    if (!base) return
+    const s = stateRef.current
+    if (!s || circlesKey === '') return
+
+    const cleanups: (() => void)[] = []
+    wsLiveCountRef.current = 0
+
+    const handleStatus = (status: WsStatus) => {
+      if (status === 'live') {
+        wsLiveCountRef.current += 1
+        setWsLive(true)
+      } else if (status === 'closed') {
+        wsLiveCountRef.current = Math.max(0, wsLiveCountRef.current - 1)
+        if (wsLiveCountRef.current === 0) setWsLive(false)
+      }
+    }
+
+    const handleMessages = (msgs: ChatMessage[]) => {
+      setState((prev) => {
+        if (!prev) return prev
+        const newMsgs = msgs.filter((m) => !prev.messages[m.msgId])
+        if (newMsgs.length === 0) return prev
+        const next = {
+          ...prev,
+          messages: { ...prev.messages },
+          channels: { ...prev.channels },
+          circles: { ...prev.circles },
+        }
+        for (const msg of newMsgs) next.messages[msg.msgId] = msg
+        applyControlEvents(next, newMsgs)
+        void saveState(next)
+        setSyncStatus(`↓ ${newMsgs.length} new`)
+        setTimeout(() => setSyncStatus(''), 3_000)
+        return next
+      })
+    }
+
+    for (const [circleId, circle] of Object.entries(s.circles)) {
+      cleanups.push(
+        openRelayWS(base, circleId, circle.secretHex, s.node.nodeId, handleMessages, handleStatus),
+      )
+    }
+
+    return () => {
+      wsLiveCountRef.current = 0
+      setWsLive(false)
+      cleanups.forEach((f) => f())
+    }
+  }, [rendezvousBase, circlesKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── State persistence helper ──────────────────────────────────────────────
 
@@ -550,6 +612,14 @@ function App() {
             <span className="tui-header-peers">
               {peerCount} peer{peerCount !== 1 ? 's' : ''}
             </span>
+            {rendezvousBase && (
+              <>
+                <span className="tui-header-sep"> │ </span>
+                <span className={wsLive ? 'tui-sync-status' : 'tui-dim'}>
+                  {wsLive ? '◦ live' : '○ poll'}
+                </span>
+              </>
+            )}
           </>
         )}
         {syncStatus && <span className="tui-sync-status">{syncStatus}</span>}

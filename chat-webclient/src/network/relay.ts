@@ -217,3 +217,90 @@ export const pullMessages = async (
 
 // Keep hmacHex re-export so legacy callers that imported it from here still compile.
 export { hmacHex }
+
+// ── WebSocket real-time subscription ─────────────────────────────────────────
+
+export type WsStatus = 'connecting' | 'live' | 'closed'
+
+/** Convert an http(s) base URL to the equivalent ws(s) URL for the WS relay. */
+const toWsUrl = (base: string, path: string): string =>
+  withV1(base, path).replace(/^http(s?):/, (_, s: string) => `ws${s}:`)
+
+/**
+ * Open a real-time WebSocket subscription to the relay for a single circle.
+ *
+ * On connect the relay sends any messages from the last 2 minutes so the
+ * client catches up without a separate HTTP pull.  After that, new messages
+ * are pushed as they arrive.
+ *
+ * The connection auto-reconnects (5 s delay) on unexpected close.
+ *
+ * @returns cleanup function — call it on unmount / circle change.
+ */
+export const openRelayWS = (
+  base: string,
+  circleId: string,
+  secretHex: string,
+  nodeId: string,
+  onMessages: (msgs: ChatMessage[]) => void,
+  onStatus: (status: WsStatus) => void,
+): (() => void) => {
+  let ws: WebSocket | null = null
+  let closed = false
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+  const connect = async () => {
+    if (closed) return
+    const hint = await circleHintFor(circleId)
+    const key = await deriveMessageKey(secretHex)
+    if (closed) return // check again after awaits
+
+    const url = toWsUrl(base, `relay/ws?circle_hint=${hint}&node_id=${encodeURIComponent(nodeId)}`)
+    onStatus('connecting')
+    ws = new WebSocket(url)
+
+    ws.onopen = () => onStatus('live')
+
+    ws.onclose = () => {
+      ws = null
+      onStatus('closed')
+      if (!closed) {
+        reconnectTimer = setTimeout(() => void connect(), 5_000)
+      }
+    }
+
+    ws.onmessage = async (event: MessageEvent) => {
+      try {
+        const frame = JSON.parse(event.data as string) as {
+          t: string
+          messages?: AnyRelayMessage[]
+        }
+        if (frame.t === 'PING') {
+          ws?.send('{"t":"PONG"}')
+          return
+        }
+        if (frame.t === 'MESSAGES' && Array.isArray(frame.messages) && frame.messages.length > 0) {
+          const results = await Promise.all(
+            frame.messages.map((r) => fromWire(key, secretHex, r)),
+          )
+          const msgs = results.filter((m): m is ChatMessage => m !== null)
+          if (msgs.length > 0) onMessages(msgs)
+        }
+      } catch (err) {
+        console.warn('[felund] WS frame error:', err)
+      }
+    }
+  }
+
+  void connect()
+
+  return () => {
+    closed = true
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+    ws?.close()
+    ws = null
+  }
+}
