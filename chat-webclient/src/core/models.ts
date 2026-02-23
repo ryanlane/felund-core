@@ -28,7 +28,7 @@ export interface ChatMessage {
   displayName: string
   createdTs: number
   text: string
-  mac: string
+  mac?: string
 }
 
 export interface State {

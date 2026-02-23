@@ -6,7 +6,7 @@ import urllib.parse
 import urllib.request
 from typing import List, Optional, Tuple
 
-from .crypto import sha256_hex
+from .crypto import decrypt_message_fields, encrypt_message_fields, sha256_hex
 from .models import State
 from .transport import parse_hostport, public_addr_hint
 
@@ -135,6 +135,9 @@ def push_messages_to_relay(api_base: str, state: State, circle_id: str) -> int:
     )[-100:]
     if not msgs:
         return 0
+    circle = state.circles.get(circle_id)
+    if not circle:
+        return 0
     hint = circle_hint(circle_id)
     stored_total = 0
     for i in range(0, len(msgs), 50):  # server limit: 50 per batch
@@ -147,10 +150,8 @@ def push_messages_to_relay(api_base: str, state: State, circle_id: str) -> int:
                     "circle_id": m.circle_id,
                     "channel_id": m.channel_id,
                     "author_node_id": m.author_node_id,
-                    "display_name": m.display_name,
                     "created_ts": m.created_ts,
-                    "text": m.text,
-                    "mac": m.mac,
+                    "enc": encrypt_message_fields(circle.secret_hex, m),
                 }
                 for m in batch
             ],
@@ -182,6 +183,8 @@ def merge_relay_messages(state: State, circle_id: str, raw_msgs: List[dict]) -> 
 
     Skips messages already present.  Returns True if anything was added.
     """
+    from cryptography.exceptions import InvalidTag
+
     from .crypto import verify_message_mac
     from .models import ChatMessage
 
@@ -194,21 +197,48 @@ def merge_relay_messages(state: State, circle_id: str, raw_msgs: List[dict]) -> 
         if not msg_id or msg_id in state.messages:
             continue
         try:
-            msg = ChatMessage(
-                msg_id=msg_id,
-                circle_id=str(raw.get("circle_id", "")),
-                channel_id=str(raw.get("channel_id", "general")),
-                author_node_id=str(raw.get("author_node_id", "")),
-                display_name=str(raw.get("display_name", "")),
-                created_ts=int(raw.get("created_ts", 0)),
-                text=str(raw.get("text", "")),
-                mac=str(raw.get("mac", "")),
-            )
-        except (TypeError, ValueError):
+            raw_circle_id = str(raw.get("circle_id", ""))
+            raw_channel_id = str(raw.get("channel_id", "general"))
+            raw_author_node_id = str(raw.get("author_node_id", ""))
+            raw_created_ts = int(raw.get("created_ts", 0))
+
+            if "enc" in raw:
+                # Encrypted path: decrypt display_name and text from enc dict
+                decrypted = decrypt_message_fields(
+                    circle.secret_hex,
+                    raw["enc"],
+                    msg_id,
+                    raw_circle_id,
+                    raw_channel_id,
+                    raw_author_node_id,
+                    raw_created_ts,
+                )
+                msg = ChatMessage(
+                    msg_id=msg_id,
+                    circle_id=raw_circle_id,
+                    channel_id=raw_channel_id,
+                    author_node_id=raw_author_node_id,
+                    display_name=decrypted["display_name"],
+                    created_ts=raw_created_ts,
+                    text=decrypted["text"],
+                )
+            else:
+                # Legacy plaintext path: verify HMAC-SHA256 MAC
+                msg = ChatMessage(
+                    msg_id=msg_id,
+                    circle_id=raw_circle_id,
+                    channel_id=raw_channel_id,
+                    author_node_id=raw_author_node_id,
+                    display_name=str(raw.get("display_name", "")),
+                    created_ts=raw_created_ts,
+                    text=str(raw.get("text", "")),
+                    mac=str(raw.get("mac", "")),
+                )
+                if not verify_message_mac(circle.secret_hex, msg):
+                    continue
+        except (TypeError, ValueError, KeyError, InvalidTag):
             continue
         if msg.circle_id != circle_id:
-            continue
-        if not verify_message_mac(circle.secret_hex, msg):
             continue
         state.messages[msg_id] = msg
         changed = True

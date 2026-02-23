@@ -4,11 +4,19 @@
  * Because browsers cannot open raw TCP connections, this module uses the
  * rendezvous server's /v1/messages endpoints as a shared message store.
  * Both web and Python clients push their messages here; all clients poll
- * for new messages.  Integrity is guaranteed by HMAC-SHA256 — the server
- * stores messages opaquely and cannot forge or tamper with them.
+ * for new messages.  Confidentiality and integrity are guaranteed by
+ * AES-256-GCM — the server stores an opaque encrypted blob and cannot
+ * read or forge message contents.
  */
 
-import { hmacHex, sha256Hex } from '../core/crypto'
+import {
+  type EncPayload,
+  decryptMessageFields,
+  deriveMessageKey,
+  encryptMessageFields,
+  hmacHex,
+  sha256Hex,
+} from '../core/crypto'
 import type { ChatMessage } from '../core/models'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -22,9 +30,20 @@ const withV1 = (base: string, path: string): string => {
 const circleHintFor = async (circleId: string): Promise<string> =>
   (await sha256Hex(circleId)).slice(0, 16)
 
-// ── Wire format (server uses snake_case) ──────────────────────────────────────
+// ── Wire formats ──────────────────────────────────────────────────────────────
 
+/** Encrypted wire format (new). */
 interface RelayMessage {
+  msg_id: string
+  circle_id: string
+  channel_id: string
+  author_node_id: string
+  created_ts: number
+  enc: EncPayload
+}
+
+/** Legacy plaintext wire format for backward-compatible reading. */
+interface LegacyRelayMessage {
   msg_id: string
   circle_id: string
   channel_id: string
@@ -35,45 +54,95 @@ interface RelayMessage {
   mac: string
 }
 
-const toWire = (m: ChatMessage): RelayMessage => ({
-  msg_id: m.msgId,
-  circle_id: m.circleId,
-  channel_id: m.channelId,
-  author_node_id: m.authorNodeId,
-  display_name: m.displayName,
-  created_ts: m.createdTs,
-  text: m.text,
-  mac: m.mac,
-})
+type AnyRelayMessage = RelayMessage | LegacyRelayMessage
 
-const fromWire = (r: RelayMessage): ChatMessage => ({
-  msgId: r.msg_id,
-  circleId: r.circle_id,
-  channelId: r.channel_id,
-  authorNodeId: r.author_node_id,
-  displayName: r.display_name,
-  createdTs: r.created_ts,
-  text: r.text,
-  mac: r.mac,
-})
+const isEncrypted = (r: AnyRelayMessage): r is RelayMessage => 'enc' in r
 
-// ── MAC verification (mirrors Python make_message_mac) ────────────────────────
+// ── Serialisation helpers ─────────────────────────────────────────────────────
 
-export const verifyMessageMac = async (
+const toWire = async (key: CryptoKey, m: ChatMessage): Promise<RelayMessage> => {
+  const clearFields = {
+    msgId: m.msgId,
+    circleId: m.circleId,
+    channelId: m.channelId,
+    authorNodeId: m.authorNodeId,
+    createdTs: m.createdTs,
+  }
+  const enc = await encryptMessageFields(key, clearFields, {
+    displayName: m.displayName,
+    text: m.text,
+  })
+  return {
+    msg_id: m.msgId,
+    circle_id: m.circleId,
+    channel_id: m.channelId,
+    author_node_id: m.authorNodeId,
+    created_ts: m.createdTs,
+    enc,
+  }
+}
+
+/**
+ * Deserialise a relay message.  Returns null and logs a warning on
+ * decryption or MAC failure.
+ */
+const fromWire = async (
+  key: CryptoKey,
   secretHex: string,
-  msg: ChatMessage,
-): Promise<boolean> => {
-  const payload = [
-    msg.msgId,
-    msg.circleId,
-    msg.channelId,
-    msg.authorNodeId,
-    msg.displayName,
-    String(msg.createdTs),
-    msg.text,
-  ].join('|')
-  const expected = await hmacHex(secretHex, payload)
-  return expected === msg.mac
+  r: AnyRelayMessage,
+): Promise<ChatMessage | null> => {
+  try {
+    if (isEncrypted(r)) {
+      // Encrypted path
+      const clearFields = {
+        msgId: r.msg_id,
+        circleId: r.circle_id,
+        channelId: r.channel_id,
+        authorNodeId: r.author_node_id,
+        createdTs: r.created_ts,
+      }
+      const { displayName, text } = await decryptMessageFields(key, r.enc, clearFields)
+      return {
+        msgId: r.msg_id,
+        circleId: r.circle_id,
+        channelId: r.channel_id,
+        authorNodeId: r.author_node_id,
+        displayName,
+        createdTs: r.created_ts,
+        text,
+      }
+    } else {
+      // Legacy plaintext path — verify HMAC-SHA256 MAC
+      const lg = r as LegacyRelayMessage
+      const macPayload = [
+        lg.msg_id,
+        lg.circle_id,
+        lg.channel_id,
+        lg.author_node_id,
+        lg.display_name,
+        String(lg.created_ts),
+        lg.text,
+      ].join('|')
+      const expected = await hmacHex(secretHex, macPayload)
+      if (expected !== lg.mac) {
+        console.warn('[felund] legacy MAC fail:', lg.msg_id.slice(0, 8))
+        return null
+      }
+      return {
+        msgId: lg.msg_id,
+        circleId: lg.circle_id,
+        channelId: lg.channel_id,
+        authorNodeId: lg.author_node_id,
+        displayName: lg.display_name,
+        createdTs: lg.created_ts,
+        text: lg.text,
+        mac: lg.mac,
+      }
+    }
+  } catch (err) {
+    console.warn('[felund] decrypt fail:', err)
+    return null
+  }
 }
 
 // ── API calls ─────────────────────────────────────────────────────────────────
@@ -85,20 +154,23 @@ export const verifyMessageMac = async (
 export const pushMessages = async (
   base: string,
   circleId: string,
+  secretHex: string,
   msgs: ChatMessage[],
 ): Promise<void> => {
   const toSend = msgs.filter((m) => m.channelId !== '__control')
   if (toSend.length === 0) return
 
   const hint = await circleHintFor(circleId)
+  const key = await deriveMessageKey(secretHex)
 
   // POST in batches of 50 (server limit)
   for (let i = 0; i < toSend.length; i += 50) {
     const batch = toSend.slice(i, i + 50)
+    const messages = await Promise.all(batch.map((m) => toWire(key, m)))
     const response = await fetch(withV1(base, 'messages'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ circle_hint: hint, messages: batch.map(toWire) }),
+      body: JSON.stringify({ circle_hint: hint, messages }),
     })
     if (!response.ok) {
       throw new Error(`Relay push failed (${response.status})`)
@@ -108,12 +180,13 @@ export const pushMessages = async (
 
 /**
  * Pull messages from the relay for a circle since a given server timestamp.
- * Returns the raw ChatMessage list (not yet MAC-verified) and the server time
- * to use as the next `since` cursor.
+ * Returns decrypted ChatMessages (null results from failed decryption are
+ * filtered out) and the server time to use as the next `since` cursor.
  */
 export const pullMessages = async (
   base: string,
   circleId: string,
+  secretHex: string,
   since: number,
 ): Promise<{ messages: ChatMessage[]; serverTime: number }> => {
   const hint = await circleHintFor(circleId)
@@ -128,11 +201,19 @@ export const pullMessages = async (
   }
   const data = (await response.json()) as {
     ok: boolean
-    messages?: RelayMessage[]
+    messages?: AnyRelayMessage[]
     server_time?: number
   }
+
+  const key = await deriveMessageKey(secretHex)
+  const results = await Promise.all(
+    (data.messages ?? []).map((r) => fromWire(key, secretHex, r)),
+  )
   return {
-    messages: (data.messages ?? []).map(fromWire),
+    messages: results.filter((m): m is ChatMessage => m !== null),
     serverTime: data.server_time ?? 0,
   }
 }
+
+// Keep hmacHex re-export so legacy callers that imported it from here still compile.
+export { hmacHex }

@@ -21,7 +21,7 @@ import {
   registerPresence,
   unregisterPresence,
 } from './network/rendezvous'
-import { pushMessages, pullMessages, verifyMessageMac } from './network/relay'
+import { pushMessages, pullMessages } from './network/relay'
 
 const formatTime = (ts: number): string => {
   const d = new Date(ts * 1000)
@@ -151,7 +151,7 @@ function App() {
           )
           if (outgoing.length > 0) {
             try {
-              await pushMessages(base, circleId, outgoing)
+              await pushMessages(base, circleId, circle.secretHex, outgoing)
               for (const m of outgoing) pushedMsgIds.add(m.msgId)
             } catch {
               /* push failure is non-fatal — will retry next cycle */
@@ -159,20 +159,18 @@ function App() {
           }
 
           const since = cursors[circleId] ?? 0
-          const { messages: incoming, serverTime } = await pullMessages(base, circleId, since)
+          const { messages: incoming, serverTime } = await pullMessages(
+            base,
+            circleId,
+            circle.secretHex,
+            since,
+          )
 
           const currentMessages = stateRef.current?.messages ?? {}
           const newMsgs: ChatMessage[] = []
           for (const msg of incoming) {
             if (currentMessages[msg.msgId]) continue
             if (msg.circleId !== circleId) continue
-            const valid = await verifyMessageMac(circle.secretHex, msg)
-            if (!valid) {
-              console.warn(
-                `[felund] MAC fail: msg=${msg.msgId.slice(0, 8)} from=${msg.displayName}`,
-              )
-              continue
-            }
             newMsgs.push(msg)
           }
 

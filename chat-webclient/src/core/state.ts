@@ -1,6 +1,6 @@
 import { openDB } from 'idb'
 
-import { hmacHex, randomHex, sha256Hex, sha256HexFromRawKey } from './crypto'
+import { randomHex, sha256Hex, sha256HexFromRawKey } from './crypto'
 import type { AccessMode, ChatMessage, Channel, Circle, State } from './models'
 import { nowTs } from './models'
 
@@ -138,19 +138,7 @@ export const sendMessage = async (state: State, text: string): Promise<ChatMessa
     displayName: state.node.displayName,
     createdTs,
     text,
-    mac: '',
   }
-
-  const macPayload = [
-    message.msgId,
-    message.circleId,
-    message.channelId,
-    message.authorNodeId,
-    message.displayName,
-    String(message.createdTs),
-    message.text,
-  ].join('|')
-  message.mac = await hmacHex(circle.secretHex, macPayload)
   state.messages[message.msgId] = message
   return message
 }
