@@ -45,6 +45,44 @@ export const hmacHex = async (keyHex: string, input: string): Promise<string> =>
   return toHex(new Uint8Array(sig))
 }
 
+// ── Session key derivation (direct peer transport) ────────────────────────────
+
+/**
+ * Derive a per-connection AES-256-GCM key via HKDF-SHA256.
+ *
+ * Mirrors Python `derive_session_key()` in crypto.py:
+ *   salt = clientNonceBytes || serverNonceBytes
+ *   info = "felund-session-v1"
+ *
+ * Used by the WebRTC DataChannel transport (Phase 3) so that direct
+ * peer connections carry the same session-level encryption as TCP gossip.
+ */
+export const deriveSessionKey = async (
+  secretHex: string,
+  clientNonceHex: string,
+  serverNonceHex: string,
+): Promise<CryptoKey> => {
+  const hexToBytes = (hex: string) =>
+    new Uint8Array((hex.match(/.{1,2}/g) ?? []).map((b) => parseInt(b, 16)))
+
+  const secretBytes = hexToBytes(secretHex)
+  const salt = new Uint8Array([...hexToBytes(clientNonceHex), ...hexToBytes(serverNonceHex)])
+
+  const baseKey = await crypto.subtle.importKey('raw', secretBytes, 'HKDF', false, ['deriveKey'])
+  return crypto.subtle.deriveKey(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt,
+      info: new Uint8Array(encoder.encode('felund-session-v1')),
+    },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  )
+}
+
 // ── AES-256-GCM message encryption ────────────────────────────────────────────
 
 /** Base64-encode bytes given as a Uint8Array or ArrayBuffer. */

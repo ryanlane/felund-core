@@ -5,7 +5,7 @@ import dataclasses
 import secrets
 from typing import Any, Dict, List, Optional
 
-from felundchat.crypto import make_token, verify_message_mac, verify_token
+from felundchat.crypto import derive_session_key, make_token, verify_message_mac, verify_token
 from felundchat.channel_sync import (
     CONTROL_CHANNEL_ID,
     apply_channel_event,
@@ -19,7 +19,9 @@ from felundchat.transport import (
     canonical_peer_addr,
     parse_hostport,
     public_addr_hint,
+    read_enc_frame,
     read_frame,
+    write_enc_frame,
     write_frame,
 )
 
@@ -80,7 +82,9 @@ class GossipNode:
             peer_node_id = str(hello.get("node_id", ""))
             circle_id = str(hello.get("circle_id", ""))
             listen_addr = str(hello.get("listen_addr", "")) if hello.get("listen_addr") else ""
-            nonce = secrets.token_hex(16)
+            # Client-supplied nonce for session key derivation (optional; absent = legacy client)
+            client_nonce = str(hello.get("nonce", ""))
+            server_nonce = secrets.token_hex(16)
 
             async with self._lock:
                 circle = self.state.circles.get(circle_id)
@@ -88,7 +92,7 @@ class GossipNode:
                     await write_frame(writer, {"t": "ERROR", "err": "Unknown circle_id"})
                     return
 
-            await write_frame(writer, {"t": "CHALLENGE", "nonce": nonce})
+            await write_frame(writer, {"t": "CHALLENGE", "nonce": server_nonce})
             hello_auth = await read_frame(reader)
             if hello_auth.get("t") != "HELLO_AUTH":
                 await write_frame(writer, {"t": "ERROR", "err": "Expected HELLO_AUTH"})
@@ -101,7 +105,7 @@ class GossipNode:
                 if not circle:
                     await write_frame(writer, {"t": "ERROR", "err": "Unknown circle_id"})
                     return
-                if not verify_token(circle.secret_hex, peer_node_id, circle_id, nonce, token):
+                if not verify_token(circle.secret_hex, peer_node_id, circle_id, server_nonce, token):
                     await write_frame(writer, {"t": "ERROR", "err": "Auth failed"})
                     return
 
@@ -116,9 +120,22 @@ class GossipNode:
 
                 self.state.circle_members.setdefault(circle_id, set()).add(peer_node_id)
                 save_state(self.state)
+                secret_hex = circle.secret_hex
 
-            await write_frame(writer, {"t": "WELCOME", "node_id": self.state.node.node_id})
-            await self._sync_with_connected_peer(reader, writer, circle_id)
+            # Negotiate session encryption: signal readiness if client sent a nonce.
+            enc_ready = bool(client_nonce)
+            await write_frame(writer, {
+                "t": "WELCOME",
+                "node_id": self.state.node.node_id,
+                "enc_ready": enc_ready,
+            })
+
+            session_key: Optional[bytes] = None
+            if enc_ready:
+                session_key = derive_session_key(secret_hex, client_nonce, server_nonce)
+                self._sync_log(f"[server] session encryption enabled for {peer_node_id[:8]}")
+
+            await self._sync_with_connected_peer(reader, writer, circle_id, session_key)
 
         except EOFError:
             return
@@ -140,7 +157,20 @@ class GossipNode:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         circle_id: str,
+        session_key: Optional[bytes] = None,
     ) -> None:
+        # Transparent read/write helpers — use session encryption when available.
+        async def _read() -> Dict[str, Any]:
+            if session_key:
+                return await read_enc_frame(reader, session_key)
+            return await read_frame(reader)
+
+        async def _write(obj: Dict[str, Any]) -> None:
+            if session_key:
+                await write_enc_frame(writer, session_key, obj)
+            else:
+                await write_frame(writer, obj)
+
         # 1) Send our peer list + message ids
         async with self._lock:
             peers = [
@@ -149,15 +179,15 @@ class GossipNode:
             ]
             mids = self.message_ids_for_circle(circle_id)
 
-        await write_frame(writer, {"t": "PEERS", "circle_id": circle_id, "peers": peers})
-        await write_frame(writer, {"t": "MSGS_HAVE", "circle_id": circle_id, "msg_ids": mids})
+        await _write({"t": "PEERS", "circle_id": circle_id, "peers": peers})
+        await _write({"t": "MSGS_HAVE", "circle_id": circle_id, "msg_ids": mids})
 
         # 2) Read their PEERS + MSGS_HAVE
-        their_peers = await read_frame(reader)
-        their_have = await read_frame(reader)
+        their_peers = await _read()
+        their_have = await _read()
 
         if their_peers.get("t") != "PEERS" or their_have.get("t") != "MSGS_HAVE":
-            await write_frame(writer, {"t": "ERROR", "err": "Bad sync frames"})
+            await _write({"t": "ERROR", "err": "Bad sync frames"})
             return
 
         incoming_peers = their_peers.get("peers", [])
@@ -170,11 +200,11 @@ class GossipNode:
 
         # 4) Request missing messages
         missing = sorted(list(incoming_msg_ids - my_msg_ids))
-        await write_frame(writer, {"t": "MSGS_REQ", "circle_id": circle_id, "msg_ids": missing})
+        await _write({"t": "MSGS_REQ", "circle_id": circle_id, "msg_ids": missing})
 
-        req = await read_frame(reader)
+        req = await _read()
         if req.get("t") != "MSGS_REQ":
-            await write_frame(writer, {"t": "ERROR", "err": "Expected MSGS_REQ"})
+            await _write({"t": "ERROR", "err": "Expected MSGS_REQ"})
             return
         they_missing = req.get("msg_ids", [])
 
@@ -185,12 +215,12 @@ class GossipNode:
                 m = self.state.messages.get(mid)
                 if m and m.circle_id == circle_id:
                     send_msgs.append(dataclasses.asdict(m))
-        await write_frame(writer, {"t": "MSGS_SEND", "circle_id": circle_id, "messages": send_msgs})
+        await _write({"t": "MSGS_SEND", "circle_id": circle_id, "messages": send_msgs})
 
         # 6) Receive messages we requested
-        their_send = await read_frame(reader)
+        their_send = await _read()
         if their_send.get("t") != "MSGS_SEND":
-            await write_frame(writer, {"t": "ERROR", "err": "Expected MSGS_SEND"})
+            await _write({"t": "ERROR", "err": "Expected MSGS_SEND"})
             return
         messages = their_send.get("messages", [])
         async with self._lock:
@@ -269,11 +299,13 @@ class GossipNode:
             return
 
         try:
+            client_nonce = secrets.token_hex(16)
             hello = {
                 "t": "HELLO",
                 "node_id": self.state.node.node_id,
                 "circle_id": circle_id,
                 "listen_addr": public_addr_hint(self.state.node.bind, self.state.node.port),
+                "nonce": client_nonce,
             }
             await write_frame(writer, hello)
 
@@ -282,10 +314,10 @@ class GossipNode:
                 self._sync_log(f"[sync] {peer_addr} {circle_id}: expected CHALLENGE")
                 return
 
-            nonce = str(challenge.get("nonce", ""))
+            server_nonce = str(challenge.get("nonce", ""))
             auth = {
                 "t": "HELLO_AUTH",
-                "token": make_token(circle.secret_hex, self.state.node.node_id, circle_id, nonce),
+                "token": make_token(circle.secret_hex, self.state.node.node_id, circle_id, server_nonce),
             }
             await write_frame(writer, auth)
 
@@ -296,7 +328,13 @@ class GossipNode:
                 )
                 return
 
-            await self._sync_with_connected_peer(reader, writer, circle_id)
+            # Enable session encryption when the server confirms it's ready.
+            session_key: Optional[bytes] = None
+            if resp.get("enc_ready"):
+                session_key = derive_session_key(circle.secret_hex, client_nonce, server_nonce)
+                self._sync_log(f"[sync] {peer_addr} {circle_id}: session encryption enabled")
+
+            await self._sync_with_connected_peer(reader, writer, circle_id, session_key)
 
         except Exception as e:
             self._sync_log(f"[sync] {peer_addr} {circle_id}: {type(e).__name__}: {e}")

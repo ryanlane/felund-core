@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import socket
 from typing import Any, Dict, Tuple
@@ -51,3 +52,39 @@ async def read_frame(reader: asyncio.StreamReader) -> Dict[str, Any]:
     if len(line) > MSG_MAX:
         raise ValueError("Frame too large")
     return json.loads(line.decode("utf-8"))
+
+
+async def write_enc_frame(
+    writer: asyncio.StreamWriter, session_key: bytes, obj: Dict[str, Any]
+) -> None:
+    """Encrypt *obj* with AES-256-GCM and send as a base64-encoded line.
+
+    Wire format: base64(12-byte-nonce || ciphertext+tag) + "\\n"
+    """
+    from felundchat.crypto import encrypt_frame_bytes
+
+    plaintext = json.dumps(obj, separators=(",", ":")).encode("utf-8")
+    encrypted = encrypt_frame_bytes(session_key, plaintext)
+    line = base64.b64encode(encrypted) + b"\n"
+    # Encrypted frames are ~4/3 the size of the plaintext; allow headroom.
+    if len(line) > MSG_MAX * 2:
+        raise ValueError("Frame too large")
+    writer.write(line)
+    await writer.drain()
+
+
+async def read_enc_frame(
+    reader: asyncio.StreamReader, session_key: bytes
+) -> Dict[str, Any]:
+    """Read a base64-encoded encrypted frame and return the decrypted object.
+
+    Raises ``cryptography.exceptions.InvalidTag`` if the GCM auth tag fails.
+    """
+    from felundchat.crypto import decrypt_frame_bytes
+
+    line = await asyncio.wait_for(reader.readline(), timeout=READ_TIMEOUT_S)
+    if not line:
+        raise EOFError
+    data = base64.b64decode(line.strip())
+    plaintext = decrypt_frame_bytes(session_key, data)
+    return json.loads(plaintext.decode("utf-8"))

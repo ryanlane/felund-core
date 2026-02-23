@@ -10,48 +10,43 @@ Track each item as `- [ ]` (pending), `- [x]` (done), or `- [-]` (skipped/deferr
 
 ### Schema
 
-- [ ] Define v2 message envelope shape and document it (JSON schema or dataclass comment)
+- [x] Define v2 message envelope shape and document it (JSON schema or dataclass comment)
   - Clear headers (AAD): `msg_id`, `circle_id`, `channel_id`, `author_node_id`, `created_ts`, `type`
   - Encrypted payload: `enc` (b64 AES-GCM ciphertext), `iv` (b64 nonce), `alg`, `key_id`
   - Top-level: `schema_version: 2`
-- [ ] Add `schema_version` field to `ChatMessage` in [chat/felundchat/models.py](../chat/felundchat/models.py)
-- [ ] Define migration shim: v1 messages (no `enc` field) are treated as legacy-plaintext on load
+- [x] Add `schema_version` field to `ChatMessage` in [chat/felundchat/models.py](../chat/felundchat/models.py)
+- [x] Define migration shim: v1 messages (no `schema_version` field) default to `schema_version=1` on load
 
 ### Python crypto
 
-- [ ] Add `derive_session_key(circle_secret, client_nonce, server_nonce) -> bytes` to [chat/felundchat/crypto.py](../chat/felundchat/crypto.py)
+- [x] Add `derive_session_key(circle_secret, client_nonce, server_nonce) -> bytes` to [chat/felundchat/crypto.py](../chat/felundchat/crypto.py)
   - `HKDF-SHA256(ikm=circle_secret_bytes, salt=client_nonce||server_nonce, info=b"felund-session-v1")`
-- [ ] Add `encrypt_frame(key, plaintext) -> bytes` to [chat/felundchat/transport.py](../chat/felundchat/transport.py)
+- [x] Add `encrypt_frame_bytes(key, plaintext) -> bytes` to [chat/felundchat/crypto.py](../chat/felundchat/crypto.py)
   - AES-256-GCM, random 12-byte nonce, prepend nonce to ciphertext
-- [ ] Add `decrypt_frame(key, ciphertext) -> bytes` with GCM auth tag verification
-- [ ] Add `encrypt_message_v2(circle_secret, msg) -> dict` to [chat/felundchat/crypto.py](../chat/felundchat/crypto.py)
-  - Encrypts `display_name` + `text`; AAD = concatenated clear header fields
-- [ ] Add `decrypt_message_v2(circle_secret, envelope) -> ChatMessage`
+- [x] Add `decrypt_frame_bytes(key, ciphertext) -> bytes` with GCM auth tag verification
+- [-] `encrypt_message_v2` / `decrypt_message_v2` — deferred; existing `encrypt_message_fields` already uses AES-256-GCM; session-level frame encryption covers the direct-path gap
 
 ### Python gossip
 
-- [ ] Update [chat/felundchat/gossip.py](../chat/felundchat/gossip.py) handshake to capture both nonces (client sends nonce in `HELLO`; server responds with its own in `CHALLENGE`)
-- [ ] Derive session key in server after `HELLO_AUTH` verified
-- [ ] Derive session key in client after `WELCOME` received
-- [ ] Wrap all subsequent `write_frame` / `read_frame` calls with encrypted frame layer
-- [ ] Update `MSGS_SEND` handler to use v2 envelope when sending
-- [ ] Update merge logic to accept both v1 (legacy) and v2 envelopes
+- [x] Update [chat/felundchat/gossip.py](../chat/felundchat/gossip.py) handshake: client sends `nonce` in `HELLO`; server uses existing `CHALLENGE` nonce as server_nonce
+- [x] Derive session key in server after `HELLO_AUTH` verified; signal `enc_ready: true` in `WELCOME`
+- [x] Derive session key in client after `WELCOME` with `enc_ready: true`
+- [x] Wrap all subsequent `write_frame` / `read_frame` calls with encrypted frame layer via local `_read`/`_write` helpers in `_sync_with_connected_peer`
+- [-] `MSGS_SEND` v2 envelope — deferred; session-level encryption already protects message content on the direct TCP path
+- [x] Merge logic unchanged — existing `ChatMessage(**md)` construction works for both v1 and v2 (schema_version defaults to 1)
 
 ### Web client crypto
 
-- [ ] Add `deriveSessionKey(circleSecret, clientNonce, serverNonce)` to [chat-webclient/src/core/crypto.ts](../chat-webclient/src/core/crypto.ts)
-- [ ] Add `encryptMessageV2(key, clearFields, privateFields)` (align with Python v2 shape)
-- [ ] Add `decryptMessageV2(key, envelope, clearFields)`
-- [ ] Update message send path in [chat-webclient/src/App.tsx](../chat-webclient/src/App.tsx) to produce v2 envelopes
-- [ ] Update message render path to decrypt v2 envelopes
-- [ ] Ensure relay push/pull in [chat-webclient/src/network/relay.ts](../chat-webclient/src/network/relay.ts) passes v2 envelopes unchanged
+- [x] Add `deriveSessionKey(secretHex, clientNonceHex, serverNonceHex)` to [chat-webclient/src/core/crypto.ts](../chat-webclient/src/core/crypto.ts)
+- [-] `encryptMessageV2` / `decryptMessageV2` — deferred; existing `encryptMessageFields` / `decryptMessageFields` already use AES-256-GCM; align when WebRTC DataChannel transport (Phase 3) is built
+- [-] App.tsx and relay.ts envelope updates — deferred to Phase 3 (no direct-path transport in web client yet)
 
 ### Verification
 
 - [ ] Wireshark capture on LAN shows no plaintext `display_name` or `text` in gossip frames
-- [ ] Bit-flip in frame ciphertext causes `decrypt_frame` to raise (GCM auth failure)
-- [ ] Existing relay-stored messages (v1) still render correctly after upgrade
-- [ ] Python TUI ↔ Python TUI sync works end-to-end with session encryption
+- [ ] Bit-flip in frame ciphertext causes `decrypt_frame_bytes` to raise `InvalidTag` (GCM auth failure)
+- [ ] Existing relay-stored messages (v1 `schema_version`) still render correctly after upgrade
+- [ ] Python TUI ↔ Python TUI sync works end-to-end with session encryption (`enc_ready: true` logged)
 
 ---
 

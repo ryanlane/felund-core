@@ -43,6 +43,7 @@ class ChatMessage:
     channel_id: str = "general"
     display_name: str = ""
     mac: str = ""
+    schema_version: int = 1  # 1 = legacy plaintext, 2 = v2 encrypted envelope
 
 
 @dataclasses.dataclass

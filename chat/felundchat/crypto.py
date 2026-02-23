@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict
 
 if TYPE_CHECKING:
     from felundchat.models import ChatMessage
@@ -113,3 +113,52 @@ def decrypt_message_fields(
         "display_name": str(data.get("display_name", "")),
         "text": str(data.get("text", "")),
     }
+
+
+# ── Session-level frame encryption (direct TCP gossip) ────────────────────────
+
+def derive_session_key(secret_hex: str, client_nonce_hex: str, server_nonce_hex: str) -> bytes:
+    """Derive a per-connection AES-256 key via HKDF-SHA256.
+
+    Both sides derive the same key from the circle secret and the two nonces
+    exchanged during the HELLO / CHALLENGE handshake:
+      salt = client_nonce_bytes || server_nonce_bytes
+      info = b"felund-session-v1"
+    """
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+    salt = bytes.fromhex(client_nonce_hex) + bytes.fromhex(server_nonce_hex)
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=b"felund-session-v1",
+    )
+    return hkdf.derive(bytes.fromhex(secret_hex))
+
+
+def encrypt_frame_bytes(session_key: bytes, plaintext: bytes) -> bytes:
+    """Encrypt a frame with AES-256-GCM.
+
+    Returns: 12-byte nonce || ciphertext (with 16-byte GCM auth tag appended).
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(session_key).encrypt(nonce, plaintext, None)
+    return nonce + ciphertext
+
+
+def decrypt_frame_bytes(session_key: bytes, data: bytes) -> bytes:
+    """Decrypt a frame produced by :func:`encrypt_frame_bytes`.
+
+    Raises ``cryptography.exceptions.InvalidTag`` if the auth tag doesn't match.
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    if len(data) < 12 + 16:
+        raise ValueError("Encrypted frame too short")
+    nonce = data[:12]
+    ciphertext = data[12:]
+    return AESGCM(session_key).decrypt(nonce, ciphertext, None)
