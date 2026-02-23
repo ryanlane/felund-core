@@ -88,8 +88,8 @@ Track each item as `- [ ]` (pending), `- [x]` (done), or `- [-]` (skipped/deferr
 
 ### Verification
 
-- [ ] Web client shows `◦ live` when WS relay is reachable
-- [ ] Send message from Python TUI; web client receives it < 500 ms (via HTTP push → WS broadcast)
+- [x] Web client shows `◦ live` when WS relay is reachable
+- [x] Send message from Python TUI; web client receives it < 500 ms (via HTTP push → WS broadcast)
 - [ ] Kill WS relay; web client falls back to HTTP poll (shows `○ poll`); WS reconnects when relay restarts
 - [ ] HTTP poll path works when pointed at PHP relay (WS unavailable — stays `○ poll`)
 
