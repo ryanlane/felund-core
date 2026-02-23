@@ -293,9 +293,7 @@ class GossipNode:
         try:
             reader, writer = await asyncio.open_connection(host, port)
         except Exception as e:
-            self._sync_log(
-                f"[sync] {peer_addr} {circle_id}: connect failed ({type(e).__name__}: {e})"
-            )
+            print(f"[sync] {peer_addr}: connect failed ({type(e).__name__}: {e})")
             return
 
         try:
@@ -328,6 +326,18 @@ class GossipNode:
                 )
                 return
 
+            # Record the server peer so our gossip loop can reach them in future rounds.
+            server_node_id = str(resp.get("node_id", ""))
+            if server_node_id and server_node_id != self.state.node.node_id:
+                async with self._lock:
+                    self.state.circle_members.setdefault(circle_id, set()).add(server_node_id)
+                    ts = now_ts()
+                    existing = self.state.peers.get(server_node_id)
+                    if not existing or ts >= existing.last_seen:
+                        self.state.peers[server_node_id] = Peer(
+                            node_id=server_node_id, addr=peer_addr, last_seen=ts,
+                        )
+
             # Enable session encryption when the server confirms it's ready.
             session_key: Optional[bytes] = None
             if resp.get("enc_ready"):
@@ -337,7 +347,7 @@ class GossipNode:
             await self._sync_with_connected_peer(reader, writer, circle_id, session_key)
 
         except Exception as e:
-            self._sync_log(f"[sync] {peer_addr} {circle_id}: {type(e).__name__}: {e}")
+            print(f"[sync] {peer_addr} {circle_id}: {type(e).__name__}: {e}")
         finally:
             try:
                 writer.close()

@@ -151,6 +151,7 @@ def cmd_send(args: argparse.Namespace) -> None:
 def cmd_run(args: argparse.Namespace) -> None:
     state = load_state()
     node = GossipNode(state)
+    node.debug_sync = getattr(args, "debug", False)
 
     async def main() -> None:
         await node.start_server()
@@ -226,6 +227,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--interval", type=int, default=5, help="Gossip interval seconds")
     sp.add_argument("--circle-id", help="Optional: circle_id to immediately sync")
     sp.add_argument("--peer", help="Optional: peer host:port to immediately sync")
+    sp.add_argument("--debug", action="store_true", help="Enable verbose sync/protocol logging")
     sp.set_defaults(func=cmd_run)
 
     sp = sub.add_parser("send", help="Broadcast a text message to a circle")
