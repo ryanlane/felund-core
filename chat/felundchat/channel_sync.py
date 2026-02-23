@@ -223,3 +223,93 @@ def apply_circle_name_event(state: State, circle_id: str, event: Dict[str, Any])
         return False
     circle.name = name
     return True
+
+
+# ---------------------------------------------------------------------------
+# Anchor announce events (ANCHOR_ANNOUNCE) — gossip anchor capability
+# ---------------------------------------------------------------------------
+
+def make_anchor_announce_message(state: State, circle_id: str) -> Optional[ChatMessage]:
+    """Build an ANCHOR_ANNOUNCE control message to gossip this node's anchor capability."""
+    circle = state.circles.get(circle_id)
+    if not circle:
+        return None
+    created = now_ts()
+    msg_id = sha256_hex(
+        f"{state.node.node_id}|{created}|{secrets.token_hex(8)}".encode("utf-8")
+    )[:32]
+    event: Dict[str, Any] = {
+        "t": "ANCHOR_ANNOUNCE",
+        "node_id": state.node.node_id,
+        "capabilities": {
+            "can_anchor": state.node.can_anchor,
+            "public_reachable": state.node.public_reachable,
+            "is_mobile": state.node.is_mobile,
+        },
+        "announced_at": created,
+    }
+    text = json.dumps(event, separators=(",", ":"), sort_keys=True)
+    msg = ChatMessage(
+        msg_id=msg_id,
+        circle_id=circle_id,
+        channel_id=CONTROL_CHANNEL_ID,
+        author_node_id=state.node.node_id,
+        display_name=state.node.display_name,
+        created_ts=created,
+        text=text,
+    )
+    msg.mac = make_message_mac(circle.secret_hex, msg)
+    return msg
+
+
+def parse_anchor_announce_event(text: str) -> Optional[Dict[str, Any]]:
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("t") != "ANCHOR_ANNOUNCE":
+        return None
+    if not data.get("node_id"):
+        return None
+    return data
+
+
+def apply_anchor_announce_event(state: State, circle_id: str, event: Dict[str, Any]) -> bool:
+    """Apply an ANCHOR_ANNOUNCE event to state.anchor_records.
+
+    Returns True if anchor_records was updated.
+    """
+    from .models import AnchorRecord
+
+    node_id = str(event.get("node_id", "")).strip()
+    if not node_id:
+        return False
+
+    caps = event.get("capabilities", {})
+    if not isinstance(caps, dict):
+        caps = {}
+    announced_at = int(event.get("announced_at", 0) or 0)
+    now = now_ts()
+
+    circle_anchors = state.anchor_records.setdefault(circle_id, {})
+    existing = circle_anchors.get(node_id)
+
+    # Always refresh last_seen; only replace the record if this announcement is newer.
+    if existing:
+        existing.last_seen_ts = now
+        if existing.announced_at >= announced_at:
+            return False
+
+    circle_anchors[node_id] = AnchorRecord(
+        node_id=node_id,
+        capabilities={
+            "can_anchor": bool(caps.get("can_anchor", False)),
+            "public_reachable": bool(caps.get("public_reachable", False)),
+            "is_mobile": bool(caps.get("is_mobile", False)),
+        },
+        announced_at=announced_at,
+        last_seen_ts=now,
+    )
+    return True

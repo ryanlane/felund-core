@@ -5,11 +5,25 @@ import dataclasses
 import secrets
 from typing import Any, Dict, List, Optional
 
-from felundchat.crypto import derive_session_key, make_token, verify_message_mac, verify_token
+from felundchat.anchor import (
+    get_current_anchor,
+    prune_anchor_store,
+    store_anchor_envelope,
+)
+from felundchat.crypto import (
+    derive_session_key,
+    encrypt_message_fields,
+    make_token,
+    verify_message_mac,
+    verify_token,
+)
 from felundchat.channel_sync import (
     CONTROL_CHANNEL_ID,
+    apply_anchor_announce_event,
     apply_channel_event,
     apply_circle_name_event,
+    make_anchor_announce_message,
+    parse_anchor_announce_event,
     parse_channel_event,
     parse_circle_name_event,
 )
@@ -33,6 +47,16 @@ class GossipNode:
         self._server: Optional[asyncio.AbstractServer] = None
         self._stop_event = asyncio.Event()
         self.debug_sync = False
+        # Anchor store: circle_id -> msg_id -> encrypted envelope dict (in-memory only).
+        # Populated when this node serves as an anchor for a circle.
+        self.anchor_store: Dict[str, Dict[str, dict]] = {}
+        # Per-circle anchor selection state (in-memory; not persisted).
+        self._current_anchor: Dict[str, Optional[str]] = {}  # circle_id -> node_id or None
+        self._current_anchor_ts: Dict[str, int] = {}         # circle_id -> selection timestamp
+        # Per-circle cursor for ANCHOR_PULL (since timestamp from last anchor pull).
+        self._anchor_pull_since: Dict[str, int] = {}
+        # Counter for periodic ANCHOR_ANNOUNCE broadcast (incremented each gossip round).
+        self._announce_counter: int = 0
 
     def _sync_log(self, message: str) -> None:
         if self.debug_sync:
@@ -124,10 +148,13 @@ class GossipNode:
 
             # Negotiate session encryption: signal readiness if client sent a nonce.
             enc_ready = bool(client_nonce)
+            # Include our anchor capability so the client can decide whether to use anchor exchange.
+            remote_can_anchor = bool(hello.get("can_anchor", False))
             await write_frame(writer, {
                 "t": "WELCOME",
                 "node_id": self.state.node.node_id,
                 "enc_ready": enc_ready,
+                "can_anchor": self.state.node.can_anchor,
             })
 
             session_key: Optional[bytes] = None
@@ -135,7 +162,10 @@ class GossipNode:
                 session_key = derive_session_key(secret_hex, client_nonce, server_nonce)
                 self._sync_log(f"[server] session encryption enabled for {peer_node_id[:8]}")
 
-            await self._sync_with_connected_peer(reader, writer, circle_id, session_key)
+            await self._sync_with_connected_peer(
+                reader, writer, circle_id, session_key,
+                is_initiator=False, remote_can_anchor=remote_can_anchor,
+            )
 
         except EOFError:
             return
@@ -158,6 +188,8 @@ class GossipNode:
         writer: asyncio.StreamWriter,
         circle_id: str,
         session_key: Optional[bytes] = None,
+        is_initiator: bool = False,
+        remote_can_anchor: bool = False,
     ) -> None:
         # Transparent read/write helpers — use session encryption when available.
         async def _read() -> Dict[str, Any]:
@@ -227,6 +259,126 @@ class GossipNode:
             self._merge_messages(circle_id, messages)
             save_state(self.state)
 
+        # ── Anchor exchange (optional, after normal sync) ──────────────────
+        #
+        # Initiator side: push our encrypted envelopes to the remote anchor
+        # and pull any envelopes the anchor has stored for us.
+        #
+        # Server side: if we are an anchor, serve ANCHOR_PUSH / ANCHOR_PULL
+        # from the initiating client.  We use a short timeout so old clients
+        # that don't send anchor frames don't stall the connection.
+
+        if is_initiator and remote_can_anchor:
+            await self._anchor_push_pull(
+                _read, _write, circle_id, push=True, pull=True
+            )
+        elif not is_initiator and self.state.node.can_anchor:
+            await self._anchor_serve(_read, _write, circle_id)
+
+    async def _anchor_push_pull(
+        self,
+        _read: Any,
+        _write: Any,
+        circle_id: str,
+        push: bool,
+        pull: bool,
+    ) -> None:
+        """Client-side anchor exchange: push our messages then pull stored ones."""
+        from .rendezvous_client import merge_relay_messages
+
+        circle = self.state.circles.get(circle_id)
+        if not circle:
+            return
+
+        if push:
+            # Build encrypted envelopes for our 50 most-recent non-control messages.
+            async with self._lock:
+                recent = sorted(
+                    (
+                        m for m in self.state.messages.values()
+                        if m.circle_id == circle_id and m.channel_id != CONTROL_CHANNEL_ID
+                    ),
+                    key=lambda m: m.created_ts,
+                )[-50:]
+            envelopes = [
+                {
+                    "msg_id": m.msg_id,
+                    "circle_id": m.circle_id,
+                    "channel_id": m.channel_id,
+                    "author_node_id": m.author_node_id,
+                    "created_ts": m.created_ts,
+                    "enc": encrypt_message_fields(circle.secret_hex, m),
+                }
+                for m in recent
+            ]
+            await _write({"t": "ANCHOR_PUSH", "circle_id": circle_id, "envelopes": envelopes})
+            try:
+                await asyncio.wait_for(_read(), timeout=5.0)  # ANCHOR_PUSH_ACK
+            except (asyncio.TimeoutError, EOFError):
+                return
+
+        if pull:
+            since = self._anchor_pull_since.get(circle_id, 0)
+            await _write({"t": "ANCHOR_PULL", "circle_id": circle_id, "since": since})
+            try:
+                resp = await asyncio.wait_for(_read(), timeout=10.0)  # ANCHOR_MSGS
+            except (asyncio.TimeoutError, EOFError):
+                return
+            if resp.get("t") == "ANCHOR_MSGS":
+                server_time = int(resp.get("server_time", 0))
+                if server_time > 0:
+                    self._anchor_pull_since[circle_id] = server_time
+                raw_envelopes = resp.get("envelopes", [])
+                if raw_envelopes:
+                    async with self._lock:
+                        changed = merge_relay_messages(self.state, circle_id, raw_envelopes)
+                    if changed:
+                        async with self._lock:
+                            save_state(self.state)
+
+    async def _anchor_serve(
+        self,
+        _read: Any,
+        _write: Any,
+        circle_id: str,
+    ) -> None:
+        """Server-side anchor exchange: receive ANCHOR_PUSH then respond to ANCHOR_PULL."""
+        # Wait for ANCHOR_PUSH with a short timeout; old clients won't send it.
+        try:
+            req = await asyncio.wait_for(_read(), timeout=3.0)
+        except (asyncio.TimeoutError, EOFError):
+            return
+
+        if req.get("t") == "ANCHOR_PUSH":
+            envelopes = req.get("envelopes", [])
+            async with self._lock:
+                for env in envelopes:
+                    msg_id = str(env.get("msg_id", ""))
+                    if msg_id:
+                        store_anchor_envelope(self.anchor_store, circle_id, msg_id, env)
+                prune_anchor_store(self.anchor_store, circle_id)
+            await _write({"t": "ANCHOR_PUSH_ACK", "stored": len(envelopes)})
+
+            # Wait for ANCHOR_PULL.
+            try:
+                pull_req = await asyncio.wait_for(_read(), timeout=3.0)
+            except (asyncio.TimeoutError, EOFError):
+                return
+
+            if pull_req.get("t") == "ANCHOR_PULL":
+                since = int(pull_req.get("since", 0) or 0)
+                async with self._lock:
+                    circle_store = self.anchor_store.get(circle_id, {})
+                    to_send = [
+                        env for env in circle_store.values()
+                        if int(env.get("created_ts", 0)) > since
+                    ][:200]
+                await _write({
+                    "t": "ANCHOR_MSGS",
+                    "envelopes": to_send,
+                    "server_time": now_ts(),
+                })
+
     def _merge_peers(self, circle_id: str, peer_dicts: List[Dict[str, Any]]) -> None:
         members = self.state.circle_members.setdefault(circle_id, set())
         for pd in peer_dicts:
@@ -265,6 +417,10 @@ class GossipNode:
                         name_event = parse_circle_name_event(m.text)
                         if name_event:
                             apply_circle_name_event(self.state, circle_id, name_event)
+                        else:
+                            anchor_event = parse_anchor_announce_event(m.text)
+                            if anchor_event:
+                                apply_anchor_announce_event(self.state, circle_id, anchor_event)
 
     def _resolve_peer_addr(self, peername: Any, listen_addr: str) -> str:
         if not listen_addr:
@@ -304,6 +460,7 @@ class GossipNode:
                 "circle_id": circle_id,
                 "listen_addr": public_addr_hint(self.state.node.bind, self.state.node.port),
                 "nonce": client_nonce,
+                "can_anchor": self.state.node.can_anchor,
             }
             await write_frame(writer, hello)
 
@@ -344,7 +501,11 @@ class GossipNode:
                 session_key = derive_session_key(circle.secret_hex, client_nonce, server_nonce)
                 self._sync_log(f"[sync] {peer_addr} {circle_id}: session encryption enabled")
 
-            await self._sync_with_connected_peer(reader, writer, circle_id, session_key)
+            remote_can_anchor = bool(resp.get("can_anchor", False))
+            await self._sync_with_connected_peer(
+                reader, writer, circle_id, session_key,
+                is_initiator=True, remote_can_anchor=remote_can_anchor,
+            )
 
         except Exception as e:
             print(f"[sync] {peer_addr} {circle_id}: {type(e).__name__}: {e}")
@@ -369,3 +530,14 @@ class GossipNode:
                     peers = [p.addr for p in self.known_peers_for_circle(cid)]
                 for addr in peers[:5]:
                     await self.connect_and_sync(addr, cid)
+
+            # Periodically broadcast our anchor capability to all circles.
+            # Every ~60 s (12 gossip rounds at 5 s default interval).
+            self._announce_counter += 1
+            if self.state.node.can_anchor and self._announce_counter % 12 == 0:
+                async with self._lock:
+                    for cid in list(self.state.circles.keys()):
+                        msg = make_anchor_announce_message(self.state, cid)
+                        if msg and msg.msg_id not in self.state.messages:
+                            self.state.messages[msg.msg_id] = msg
+                    save_state(self.state)

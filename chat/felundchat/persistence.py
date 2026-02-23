@@ -6,6 +6,7 @@ import json
 import felundchat.config as _cfg
 from felundchat.config import MESSAGE_MAX_AGE_S, MAX_MESSAGES_PER_CIRCLE
 from felundchat.models import (
+    AnchorRecord,
     ChatMessage,
     Channel,
     Circle,
@@ -90,6 +91,15 @@ def load_state() -> State:
             m["channel_id"] = "general"
         messages[mid] = _load_dataclass_strict(ChatMessage, m, f"messages[{mid}]")
 
+    anchor_records: dict = {}
+    for cid, node_map in data.get("anchor_records", {}).items():
+        anchor_records[cid] = {}
+        for nid, rec in node_map.items():
+            try:
+                anchor_records[cid][nid] = AnchorRecord(**rec)
+            except TypeError:
+                pass  # skip malformed records; they'll be refreshed via gossip
+
     state = State(
         node=node,
         circles=circles,
@@ -100,6 +110,7 @@ def load_state() -> State:
         channel_members=channel_members,
         channel_requests=channel_requests,
         node_display_names=node_display_names,
+        anchor_records=anchor_records,
     )
     if not state.node.bind or state.node.bind == "0.0.0.0":
         state.node.bind = detect_local_ip()
@@ -132,6 +143,13 @@ def save_state(state: State) -> None:
             for cid, circle_map in state.channel_requests.items()
         },
         "node_display_names": dict(state.node_display_names),
+        "anchor_records": {
+            cid: {
+                nid: dataclasses.asdict(rec)
+                for nid, rec in node_map.items()
+            }
+            for cid, node_map in state.anchor_records.items()
+        },
     }
     tmp = _cfg.STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")

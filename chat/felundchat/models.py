@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import secrets
 import time
-from typing import Dict, Set
+from typing import Any, Dict, Set
 
 
 def now_ts() -> int:
@@ -17,6 +17,9 @@ class NodeConfig:
     port: int
     display_name: str = "anon"
     rendezvous_base: str = ""  # relay URL; set via FELUND_API_BASE env or F3 settings; empty = disabled
+    can_anchor: bool = False       # True: this node is willing to store-and-forward for the circle
+    is_mobile: bool = False        # True: this node is on a mobile/intermittent connection
+    public_reachable: bool = False  # True: this node is publicly reachable (updated from observed connects)
 
 
 @dataclasses.dataclass
@@ -31,6 +34,15 @@ class Peer:
     node_id: str
     addr: str  # host:port
     last_seen: int
+
+
+@dataclasses.dataclass
+class AnchorRecord:
+    """Tracks a peer that has announced anchor capability for a circle."""
+    node_id: str
+    capabilities: Dict[str, Any]  # can_anchor, public_reachable, is_mobile, bandwidth_hint
+    announced_at: int              # unix timestamp of the latest ANCHOR_ANNOUNCE event
+    last_seen_ts: int              # unix timestamp when we last processed an announce from this node
 
 
 @dataclasses.dataclass
@@ -67,6 +79,9 @@ class State:
     channel_members: Dict[str, Dict[str, Set[str]]]  # circle_id -> channel_id -> member node_ids
     channel_requests: Dict[str, Dict[str, Set[str]]]  # circle_id -> channel_id -> pending node_ids
     node_display_names: Dict[str, str]  # node_id -> latest display name
+    anchor_records: Dict[str, Dict[str, AnchorRecord]] = dataclasses.field(
+        default_factory=dict
+    )  # circle_id -> node_id -> AnchorRecord (persisted so nodes remember known anchors)
 
     @staticmethod
     def default(bind: str, port: int) -> State:
@@ -82,4 +97,5 @@ class State:
             channel_members={},
             channel_requests={},
             node_display_names={node_id: "anon"},
+            anchor_records={},
         )

@@ -150,6 +150,8 @@ def cmd_send(args: argparse.Namespace) -> None:
 
 def cmd_run(args: argparse.Namespace) -> None:
     state = load_state()
+    if getattr(args, "anchor", False):
+        state.node.can_anchor = True
     node = GossipNode(state)
     node.debug_sync = getattr(args, "debug", False)
 
@@ -228,6 +230,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--circle-id", help="Optional: circle_id to immediately sync")
     sp.add_argument("--peer", help="Optional: peer host:port to immediately sync")
     sp.add_argument("--debug", action="store_true", help="Enable verbose sync/protocol logging")
+    sp.add_argument(
+        "--anchor", action="store_true",
+        help="Act as an anchor node: store and forward encrypted messages for the circle",
+    )
     sp.set_defaults(func=cmd_run)
 
     sp = sub.add_parser("send", help="Broadcast a text message to a circle")

@@ -52,7 +52,11 @@ def register_presence(api_base: str, state: State, circle_id: str, ttl_s: int = 
                 "nat": "unknown",
             }
         ],
-        "capabilities": {"relay": False, "transport": ["tcp"]},
+        "capabilities": {
+            "relay": False,
+            "transport": ["tcp"],
+            "can_anchor": state.node.can_anchor,
+        },
         "ttl_s": ttl_s,
     }
     headers = {"X-Felund-Node": state.node.node_id}

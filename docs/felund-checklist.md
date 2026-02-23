@@ -99,42 +99,43 @@ Track each item as `- [ ]` (pending), `- [x]` (done), or `- [-]` (skipped/deferr
 
 ### Models & events
 
-- [ ] Add capability fields to `NodeConfig` in [chat/felundchat/models.py](../chat/felundchat/models.py)
+- [x] Add capability fields to `NodeConfig` in [chat/felundchat/models.py](../chat/felundchat/models.py)
   - `can_anchor: bool = False`
   - `is_mobile: bool = False`
   - `public_reachable: bool = False` (updated from observed connects)
-- [ ] Add `ANCHOR_ANNOUNCE` to control event types in [chat/felundchat/channel_sync.py](../chat/felundchat/channel_sync.py)
-  - Fields: `node_id`, `capabilities {can_anchor, public_reachable, is_mobile, bandwidth_hint}`, `announced_at`
-- [ ] Add `AnchorRecord` dataclass: `node_id`, `capabilities`, `announced_at`, `last_seen_ts`
-- [ ] Add `anchor_records: Dict[circle_id, Dict[node_id, AnchorRecord]]` to `State`
+- [x] Add `ANCHOR_ANNOUNCE` to control event types in [chat/felundchat/channel_sync.py](../chat/felundchat/channel_sync.py)
+  - Fields: `node_id`, `capabilities {can_anchor, public_reachable, is_mobile}`, `announced_at`
+  - Helpers: `make_anchor_announce_message`, `parse_anchor_announce_event`, `apply_anchor_announce_event`
+- [x] Add `AnchorRecord` dataclass to [chat/felundchat/models.py](../chat/felundchat/models.py): `node_id`, `capabilities`, `announced_at`, `last_seen_ts`
+- [x] Add `anchor_records: Dict[circle_id, Dict[node_id, AnchorRecord]]` to `State` (persisted)
 
 ### Anchor ranking
 
-- [ ] Implement `rank_anchor_candidates(state, circle_id) -> List[str]` (returns node_ids, best first)
-  - Score: `public_reachable*8 + can_anchor*4 + (not is_mobile)*2 + uptime_score + node_id_tiebreak`
-- [ ] Implement `get_current_anchor(state, circle_id) -> Optional[str]`
-  - Returns current anchor node_id with hysteresis applied
-- [ ] Add hysteresis state: `anchor_selected_ts`, `current_anchor_node_id` per circle
-- [ ] Enforce cooldown (60s) and staleness threshold (20s) per Policy 1
+- [x] Implement `rank_anchor_candidates(state, circle_id) -> List[str]` in [chat/felundchat/anchor.py](../chat/felundchat/anchor.py)
+  - Score: `public_reachable*8 + can_anchor*4 + (not is_mobile)*2 + node_id_tiebreak`
+- [x] Implement `get_current_anchor(state, circle_id, current, ts) -> Optional[str]` with hysteresis
+- [x] Hysteresis state (`_current_anchor`, `_current_anchor_ts`) in `GossipNode` (in-memory)
+- [x] Cooldown 60s, staleness threshold 20s per Policy 1
 
 ### Anchor storage
 
-- [ ] Add `anchor_store: Dict[circle_id, Dict[msg_id, bytes]]` (encrypted envelopes, in-memory)
-- [ ] Implement `store_anchor_envelope(state, circle_id, channel_id, msg_id, envelope_bytes)`
-- [ ] Implement `prune_anchor_store(state, circle_id)` per Policy 3 (24h / 500 msgs / 50 MB)
-- [ ] Expose `GET /anchor/messages?circle_hint=&since=` over gossip TCP (or re-use relay API shape)
-- [ ] Expose `POST /anchor/messages` for peers to push envelopes to the anchor
+- [x] Add `anchor_store: Dict[circle_id, Dict[msg_id, dict]]` in `GossipNode` (encrypted envelopes, in-memory)
+- [x] Implement `store_anchor_envelope(anchor_store, circle_id, msg_id, envelope)` in [chat/felundchat/anchor.py](../chat/felundchat/anchor.py)
+- [x] Implement `prune_anchor_store(anchor_store, circle_id)` per Policy 3 (24h / 500 msgs / 50 MB)
+- [x] Anchor push/pull integrated into gossip TCP protocol (ANCHOR_PUSH / ANCHOR_PUSH_ACK / ANCHOR_PULL / ANCHOR_MSGS frames)
+  - Initiator pushes 50 most-recent encrypted envelopes to anchor after normal sync
+  - Initiator pulls stored envelopes from anchor using `_anchor_pull_since` cursor
 
 ### Routing integration
 
-- [ ] Update routing in [chat/felundchat/rendezvous_client.py](../chat/felundchat/rendezvous_client.py) to follow Policy 2:
-  1. Direct P2P gossip
-  2. Anchor push/pull
-  3. Next anchor if current offline
-  4. Hosted WS relay
-  5. Hosted HTTP poll
-- [ ] Periodically broadcast `ANCHOR_ANNOUNCE` if `node.can_anchor == True`
-- [ ] Update [chat-webclient/src/network/rendezvous.ts](../chat-webclient/src/network/rendezvous.ts) to register `can_anchor: false`
+- [x] `_anchor_push_pull` / `_anchor_serve` methods in [chat/felundchat/gossip.py](../chat/felundchat/gossip.py)
+  - `is_initiator=True` + `remote_can_anchor=True` → push + pull
+  - `is_initiator=False` + `self.state.node.can_anchor` → serve anchor requests (3s timeout for old clients)
+- [x] `can_anchor` advertised in HELLO and WELCOME handshake frames
+- [x] Periodically broadcast `ANCHOR_ANNOUNCE` every ~60s if `node.can_anchor == True` (in `gossip_loop`)
+- [x] Update [chat-webclient/src/network/rendezvous.ts](../chat-webclient/src/network/rendezvous.ts) to register `can_anchor: false`
+- [x] Update [chat/felundchat/rendezvous_client.py](../chat/felundchat/rendezvous_client.py) to include `can_anchor` in capabilities
+- [x] Add `--anchor` flag to `run` subcommand in [chat/felundchat/cli.py](../chat/felundchat/cli.py)
 
 ### Verification
 

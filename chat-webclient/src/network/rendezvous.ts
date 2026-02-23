@@ -99,7 +99,7 @@ export const registerPresence = async (
       node_id: input.nodeId,
       circle_hint: hint,
       endpoints: [defaultEndpoint()],
-      capabilities: { relay: false, transport: ['ws'] },
+      capabilities: { relay: false, transport: ['ws'], can_anchor: false },
       ttl_s: input.ttlS ?? 120,
     }),
   })
