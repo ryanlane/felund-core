@@ -108,6 +108,29 @@
 .tui-channel-item:hover { background: #14142a; color: #9999bb; }
 .tui-channel-item.active { color: #7a9fff; background: #12122a; }
 
+/* ── Call panel ──────────────────────────────────────────────────────────── */
+
+.tui-call-panel {
+  border-top: 1px solid #1a1a3a;
+  margin-top: auto;
+  padding-top: 0.25rem;
+}
+
+.tui-call-participant {
+  padding: 0.2rem 0.75rem;
+  font-size: 0.82rem;
+  color: #7a9fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tui-call-actions {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.4rem 0.75rem 0.5rem;
+}
+
 /* ── Main (message area) ───────────────────────────────────────────────── */
 
 .tui-main {

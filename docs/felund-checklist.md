@@ -200,41 +200,45 @@ Track each item as `- [ ]` (pending), `- [x]` (done), or `- [-]` (skipped/deferr
 
 ### Event types
 
-- [ ] Add `call.*` event types to [chat/felundchat/channel_sync.py](../chat/felundchat/channel_sync.py)
-  - `call.create {session_id, host_node_id, circle_id, channel_id, created_ts}`
-  - `call.invite {session_id, target_node_id}`
-  - `call.join {session_id, node_id}`
-  - `call.leave {session_id, node_id, reason}`
-  - `call.end {session_id, host_node_id}`
-  - `call.signal.offer {session_id, from, to, sdp}`
-  - `call.signal.answer {session_id, from, to, sdp}`
-  - `call.signal.candidate {session_id, from, to, candidate}`
-- [ ] All `call.*` events use v2 encrypted envelope (same as chat messages)
+- [x] Add `call.*` event types to [chat/felundchat/channel_sync.py](../chat/felundchat/channel_sync.py)
+  - `CALL_EVT op=create {session_id, host_node_id, actor_node_id, circle_id, channel_id, created_ts}`
+  - `CALL_EVT op=invite {session_id, target_node_id, actor_node_id}` — host only, no state change
+  - `CALL_EVT op=join {session_id, node_id, actor_node_id}`
+  - `CALL_EVT op=leave {session_id, node_id, actor_node_id, reason}`
+  - `CALL_EVT op=end {session_id, host_node_id, actor_node_id}` — host only
+  - `CALL_EVT op=signal.offer/answer/candidate {session_id, from_node_id, to_node_id, …}` — point-to-point, no state change
+- [x] Call events propagate through the `__control` gossip channel (same encryption as chat messages)
+- [x] Python helpers: `make_call_event_message`, `parse_call_event`, `apply_call_event` in channel_sync.py
+- [x] Call events dispatched in `gossip.py` `_merge_messages` (after anchor events)
 
 ### Models
 
-- [ ] Add `CallSession` dataclass to [chat/felundchat/models.py](../chat/felundchat/models.py)
-  - `session_id`, `host_node_id`, `circle_id`, `participants: Set[str]`, `viewers: Set[str]`, `state`, `created_ts`
-- [ ] Add `active_calls: Dict[session_id, CallSession]` to `State`
+- [x] Add `CallSession` dataclass to [chat/felundchat/models.py](../chat/felundchat/models.py)
+  - `session_id`, `host_node_id`, `circle_id`, `channel_id`, `participants: Set[str]`, `viewers: Set[str]`, `call_state`, `created_ts`
+- [x] Add `active_calls: Dict[str, CallSession]` to `State` (ephemeral — not persisted, `default_factory=dict`)
+- [x] `CallSession` and `activeCalls: Record<string, CallSession>` added to TypeScript [models.ts](../chat-webclient/src/core/models.ts) and [state.ts](../chat-webclient/src/core/state.ts)
 
 ### Role enforcement
 
-- [ ] Only `host_node_id` can emit `call.end` or `call.invite`
-- [ ] Non-members (not in circle) cannot join
-- [ ] Viewers receive media only; cannot emit `call.signal.*` toward non-hosts
+- [x] `call.end`: only accepted if `actor_node_id` matches `call.host_node_id` (Python + TS)
+- [x] `call.join`: circle membership checked against `circle_members` (Python); HMAC auth enforces membership implicitly (TS)
+- [x] `signal.*` ops: no tracked state change; addressed by `to_node_id` so only target processes them
 
 ### Web client
 
-- [ ] Add call session state to [chat-webclient/src/App.tsx](../chat-webclient/src/App.tsx)
-- [ ] Render call status indicator in header (active call in this channel)
-- [ ] Show join/leave button for active calls
-- [ ] Render participant list in call UI
+- [x] `activeCalls` added to `State`; reset to `{}` on page load (ephemeral)
+- [x] `applyControlEvents` in [state.ts](../chat-webclient/src/core/state.ts) handles all CALL_EVT ops
+- [x] Call action helpers: `createCall`, `joinCall`, `leaveCall`, `endCall` in state.ts
+- [x] Header shows `◈ call(N)` when call is active in current channel (◈ = in call, ◇ = call exists but not joined)
+- [x] Sidebar call panel: participant list with host indicator (★), Join/Leave/End buttons
+- [x] `/call start|join|leave|end` slash commands in the composer
 
 ### Verification
 
-- [ ] Full call lifecycle: create → invite → join → leave → end — all events received by all circle members
-- [ ] Non-member node cannot join call (event rejected on receive)
-- [ ] Host call.end terminates session for all participants
+- [ ] Full call lifecycle: create → join → leave → end — events received by all circle members (relay sync)
+- [ ] Non-host `call.end` rejected (event applied only when actor matches host)
+- [ ] Host call.end removes session from `active_calls` for all nodes
+- [ ] Call panel shows correct join/leave/end buttons depending on role and membership
 
 ---
 

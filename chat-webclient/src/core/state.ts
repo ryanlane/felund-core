@@ -1,7 +1,7 @@
 import { openDB } from 'idb'
 
 import { randomHex, sha256Hex, sha256HexFromRawKey } from './crypto'
-import type { AccessMode, ChatMessage, Channel, Circle, State } from './models'
+import type { AccessMode, CallSession, ChatMessage, Channel, Circle, State } from './models'
 import { nowTs } from './models'
 
 const DB_NAME = 'felundchat-web'
@@ -21,6 +21,7 @@ const defaultState = (): State => {
     circles: {},
     channels: {},
     messages: {},
+    activeCalls: {},
   }
 }
 
@@ -45,6 +46,8 @@ const sanitizeLoadedState = (raw: unknown): State => {
     circles: data.circles ?? {},
     channels: data.channels ?? {},
     messages: data.messages ?? {},
+    // activeCalls is always reset — call sessions are ephemeral.
+    activeCalls: {},
   }
 }
 
@@ -200,8 +203,174 @@ export const applyControlEvents = (state: State, msgs: ChatMessage[]): boolean =
         changed = true
       }
     }
+
+    if (e['t'] === 'CALL_EVT') {
+      const op = String(e['op'] ?? '')
+      const sessionId = String(e['session_id'] ?? '').trim()
+      const actorNodeId = String(e['actor_node_id'] ?? '').trim()
+      if (!sessionId) continue
+
+      if (op === 'create') {
+        if (!state.activeCalls[sessionId]) {
+          const hostNodeId = String(e['host_node_id'] ?? actorNodeId).trim()
+          const channelId = String(e['channel_id'] ?? 'general').trim() || 'general'
+          const createdTs = typeof e['created_ts'] === 'number' ? e['created_ts'] : nowTs()
+          state.activeCalls[sessionId] = {
+            sessionId,
+            hostNodeId,
+            circleId: msg.circleId,
+            channelId,
+            createdTs,
+            participants: [hostNodeId],
+            viewers: [],
+            callState: 'pending',
+          }
+          changed = true
+        }
+      } else {
+        const call = state.activeCalls[sessionId]
+        if (!call) continue
+
+        if (op === 'join') {
+          const nodeId = String(e['node_id'] ?? actorNodeId).trim()
+          if (nodeId && !call.participants.includes(nodeId)) {
+            call.participants = [...call.participants, nodeId].sort()
+            if (call.callState === 'pending' && call.participants.length > 1) {
+              call.callState = 'active'
+            }
+            changed = true
+          }
+        } else if (op === 'leave') {
+          const nodeId = String(e['node_id'] ?? actorNodeId).trim()
+          if (nodeId) {
+            const hadIt =
+              call.participants.includes(nodeId) || call.viewers.includes(nodeId)
+            call.participants = call.participants.filter((id) => id !== nodeId)
+            call.viewers = call.viewers.filter((id) => id !== nodeId)
+            if (hadIt) changed = true
+          }
+        } else if (op === 'end') {
+          // Only accept end from the host.
+          const hostInEvent = String(e['host_node_id'] ?? actorNodeId).trim()
+          if (!hostInEvent || hostInEvent === call.hostNodeId) {
+            delete state.activeCalls[sessionId]
+            changed = true
+          }
+        }
+        // invite and signal.* ops: no tracked state change.
+      }
+    }
   }
   return changed
+}
+
+// ── Call action helpers ───────────────────────────────────────────────────────
+
+/** Build and add a control-channel ChatMessage for a call event. */
+const makeCallEventMsg = async (
+  state: State,
+  circleId: string,
+  event: Record<string, unknown>,
+): Promise<ChatMessage> => {
+  const createdTs = nowTs()
+  const msgId = (await sha256Hex(`${state.node.nodeId}|${createdTs}|${randomHex(8)}`)).slice(0, 32)
+  return {
+    msgId,
+    circleId,
+    channelId: CONTROL_CHANNEL_ID,
+    authorNodeId: state.node.nodeId,
+    displayName: state.node.displayName,
+    createdTs,
+    text: JSON.stringify({ ...event, actor_node_id: state.node.nodeId }),
+  }
+}
+
+/** Create a new call in the current channel and return the CALL_EVT message. */
+export const createCall = async (state: State): Promise<ChatMessage | null> => {
+  const circleId = state.currentCircleId
+  const channelId = state.currentChannelId
+  if (!circleId || !channelId) return null
+  const sessionId = randomHex(16)
+  const createdTs = nowTs()
+  const event = {
+    t: 'CALL_EVT',
+    op: 'create',
+    session_id: sessionId,
+    host_node_id: state.node.nodeId,
+    circle_id: circleId,
+    channel_id: channelId,
+    created_ts: createdTs,
+  }
+  const msg = await makeCallEventMsg(state, circleId, event)
+  state.messages[msg.msgId] = msg
+  // Apply locally so the UI updates immediately.
+  const session: CallSession = {
+    sessionId,
+    hostNodeId: state.node.nodeId,
+    circleId,
+    channelId,
+    createdTs,
+    participants: [state.node.nodeId],
+    viewers: [],
+    callState: 'pending',
+  }
+  state.activeCalls[sessionId] = session
+  return msg
+}
+
+/** Join an existing call and return the CALL_EVT message. */
+export const joinCall = async (state: State, sessionId: string): Promise<ChatMessage | null> => {
+  const call = state.activeCalls[sessionId]
+  if (!call) return null
+  const event = {
+    t: 'CALL_EVT',
+    op: 'join',
+    session_id: sessionId,
+    node_id: state.node.nodeId,
+  }
+  const msg = await makeCallEventMsg(state, call.circleId, event)
+  state.messages[msg.msgId] = msg
+  if (!call.participants.includes(state.node.nodeId)) {
+    call.participants = [...call.participants, state.node.nodeId].sort()
+    if (call.callState === 'pending' && call.participants.length > 1) {
+      call.callState = 'active'
+    }
+  }
+  return msg
+}
+
+/** Leave a call and return the CALL_EVT message. */
+export const leaveCall = async (state: State, sessionId: string): Promise<ChatMessage | null> => {
+  const call = state.activeCalls[sessionId]
+  if (!call) return null
+  const event = {
+    t: 'CALL_EVT',
+    op: 'leave',
+    session_id: sessionId,
+    node_id: state.node.nodeId,
+    reason: 'user_left',
+  }
+  const msg = await makeCallEventMsg(state, call.circleId, event)
+  state.messages[msg.msgId] = msg
+  call.participants = call.participants.filter((id) => id !== state.node.nodeId)
+  call.viewers = call.viewers.filter((id) => id !== state.node.nodeId)
+  return msg
+}
+
+/** End a call (host only) and return the CALL_EVT message. */
+export const endCall = async (state: State, sessionId: string): Promise<ChatMessage | null> => {
+  const call = state.activeCalls[sessionId]
+  if (!call || call.hostNodeId !== state.node.nodeId) return null
+  const event = {
+    t: 'CALL_EVT',
+    op: 'end',
+    session_id: sessionId,
+    host_node_id: state.node.nodeId,
+  }
+  const msg = await makeCallEventMsg(state, call.circleId, event)
+  state.messages[msg.msgId] = msg
+  delete state.activeCalls[sessionId]
+  return msg
 }
 
 export const visibleMessages = (state: State): ChatMessage[] => {

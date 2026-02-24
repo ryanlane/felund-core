@@ -37,6 +37,25 @@ class Peer:
 
 
 @dataclasses.dataclass
+class CallSession:
+    """Tracks an in-progress call session within a circle.
+
+    Call sessions are ephemeral — not persisted to disk.  The CALL_EVT control
+    messages that created/modified the session are stored as ordinary
+    ChatMessages and re-fetched from the relay on reconnect, but
+    ``active_calls`` itself is always empty on process restart.
+    """
+    session_id: str
+    host_node_id: str
+    circle_id: str
+    channel_id: str
+    created_ts: int
+    participants: Set[str] = dataclasses.field(default_factory=set)
+    viewers: Set[str] = dataclasses.field(default_factory=set)
+    call_state: str = "pending"  # pending | active | ended
+
+
+@dataclasses.dataclass
 class AnchorRecord:
     """Tracks a peer that has announced anchor capability for a circle."""
     node_id: str
@@ -82,6 +101,9 @@ class State:
     anchor_records: Dict[str, Dict[str, AnchorRecord]] = dataclasses.field(
         default_factory=dict
     )  # circle_id -> node_id -> AnchorRecord (persisted so nodes remember known anchors)
+    active_calls: Dict[str, "CallSession"] = dataclasses.field(
+        default_factory=dict
+    )  # session_id -> CallSession (ephemeral — not persisted)
 
     @staticmethod
     def default(bind: str, port: int) -> State:

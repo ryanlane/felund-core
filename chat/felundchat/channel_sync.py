@@ -5,7 +5,7 @@ import secrets
 from typing import Any, Dict, Optional
 
 from .crypto import make_message_mac, sha256_hex
-from .models import Channel, ChatMessage, State, now_ts
+from .models import CallSession, Channel, ChatMessage, State, now_ts
 
 
 CONTROL_CHANNEL_ID = "__control"
@@ -313,3 +313,143 @@ def apply_anchor_announce_event(state: State, circle_id: str, event: Dict[str, A
         last_seen_ts=now,
     )
     return True
+
+
+# ---------------------------------------------------------------------------
+# Call events (CALL_EVT) — real-time call session control plane
+# ---------------------------------------------------------------------------
+
+CALL_OPS = {
+    "create",
+    "invite",
+    "join",
+    "leave",
+    "end",
+    "signal.offer",
+    "signal.answer",
+    "signal.candidate",
+}
+
+
+def make_call_event_message(state: State, circle_id: str, event: Dict[str, Any]) -> Optional[ChatMessage]:
+    """Wrap a CALL_EVT dict in a signed ChatMessage on the __control channel."""
+    circle = state.circles.get(circle_id)
+    if not circle:
+        return None
+    created = now_ts()
+    msg_id = sha256_hex(
+        f"{state.node.node_id}|{created}|{secrets.token_hex(8)}".encode("utf-8")
+    )[:32]
+    event.setdefault("actor_node_id", state.node.node_id)
+    text = json.dumps(event, separators=(",", ":"), sort_keys=True)
+    msg = ChatMessage(
+        msg_id=msg_id,
+        circle_id=circle_id,
+        channel_id=CONTROL_CHANNEL_ID,
+        author_node_id=state.node.node_id,
+        display_name=state.node.display_name,
+        created_ts=created,
+        text=text,
+    )
+    msg.mac = make_message_mac(circle.secret_hex, msg)
+    return msg
+
+
+def parse_call_event(text: str) -> Optional[Dict[str, Any]]:
+    """Return the parsed CALL_EVT dict or None if the text is not a valid call event."""
+    try:
+        data = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("t") != "CALL_EVT":
+        return None
+    if str(data.get("op", "")) not in CALL_OPS:
+        return None
+    if not str(data.get("session_id", "")):
+        return None
+    return data
+
+
+def apply_call_event(state: State, circle_id: str, event: Dict[str, Any]) -> bool:
+    """Apply a CALL_EVT to ``state.active_calls``.
+
+    Returns True if the call state was modified.
+
+    Role rules enforced here:
+    - ``call.end``: only accepted if ``actor_node_id`` matches the call's host.
+    - ``call.invite``: only accepted from the host (no state change either way).
+    - ``call.join``: actor must be a known circle member (or the host).
+    - ``signal.*`` ops: pass-through — they do not modify tracked call state.
+    """
+    op = str(event.get("op", ""))
+    session_id = str(event.get("session_id", "")).strip()
+    actor_node_id = str(event.get("actor_node_id", "")).strip()
+
+    if not session_id:
+        return False
+
+    if op == "create":
+        if session_id in state.active_calls:
+            return False  # idempotent
+        host_node_id = str(event.get("host_node_id", actor_node_id)).strip()
+        channel_id = str(event.get("channel_id", "general")).strip() or "general"
+        created_ts = int(event.get("created_ts", now_ts()) or now_ts())
+        session = CallSession(
+            session_id=session_id,
+            host_node_id=host_node_id,
+            circle_id=circle_id,
+            channel_id=channel_id,
+            created_ts=created_ts,
+        )
+        session.participants.add(host_node_id)
+        state.active_calls[session_id] = session
+        return True
+
+    call = state.active_calls.get(session_id)
+    if not call:
+        return False
+
+    if op == "join":
+        node_id = str(event.get("node_id", actor_node_id)).strip()
+        if not node_id:
+            return False
+        # Enforce circle membership: must be in circle_members or be the host.
+        members = state.circle_members.get(circle_id, set())
+        if node_id != call.host_node_id and members and node_id not in members:
+            return False
+        if node_id in call.participants:
+            return False
+        call.participants.add(node_id)
+        if call.call_state == "pending" and len(call.participants) > 1:
+            call.call_state = "active"
+        return True
+
+    if op == "leave":
+        node_id = str(event.get("node_id", actor_node_id)).strip()
+        if not node_id:
+            return False
+        changed = node_id in call.participants or node_id in call.viewers
+        call.participants.discard(node_id)
+        call.viewers.discard(node_id)
+        return changed
+
+    if op == "end":
+        # Only the host may end the call.
+        if actor_node_id and actor_node_id != call.host_node_id:
+            return False
+        host_in_event = str(event.get("host_node_id", "")).strip()
+        if host_in_event and host_in_event != call.host_node_id:
+            return False
+        call.call_state = "ended"
+        state.active_calls.pop(session_id, None)
+        return True
+
+    if op == "invite":
+        # Only the host may invite; no tracked state change.
+        return False
+
+    # signal.offer / signal.answer / signal.candidate: point-to-point,
+    # no change to tracked call state.
+    return False

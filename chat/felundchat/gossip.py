@@ -20,10 +20,12 @@ from felundchat.crypto import (
 from felundchat.channel_sync import (
     CONTROL_CHANNEL_ID,
     apply_anchor_announce_event,
+    apply_call_event,
     apply_channel_event,
     apply_circle_name_event,
     make_anchor_announce_message,
     parse_anchor_announce_event,
+    parse_call_event,
     parse_channel_event,
     parse_circle_name_event,
 )
@@ -421,6 +423,10 @@ class GossipNode:
                             anchor_event = parse_anchor_announce_event(m.text)
                             if anchor_event:
                                 apply_anchor_announce_event(self.state, circle_id, anchor_event)
+                            else:
+                                call_event = parse_call_event(m.text)
+                                if call_event:
+                                    apply_call_event(self.state, circle_id, call_event)
 
     def _resolve_peer_addr(self, peername: Any, listen_addr: str) -> str:
         if not listen_addr:

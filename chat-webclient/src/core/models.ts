@@ -31,6 +31,21 @@ export interface ChatMessage {
   mac?: string
 }
 
+export type CallState = 'pending' | 'active' | 'ended'
+
+export interface CallSession {
+  sessionId: string
+  hostNodeId: string
+  circleId: string
+  channelId: string
+  createdTs: number
+  /** Sorted list of participant node IDs (includes host). */
+  participants: string[]
+  /** Sorted list of viewer node IDs (receive-only). */
+  viewers: string[]
+  callState: CallState
+}
+
 export interface State {
   node: NodeConfig
   settings: {
@@ -39,6 +54,8 @@ export interface State {
   circles: Record<string, Circle>
   channels: Record<string, Record<string, Channel>>
   messages: Record<string, ChatMessage>
+  /** Ephemeral call sessions — always reset to {} on page load. */
+  activeCalls: Record<string, CallSession>
   currentCircleId?: string
   currentChannelId?: string
 }

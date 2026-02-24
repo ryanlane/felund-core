@@ -5,9 +5,13 @@ import { parseInviteCode, makeInviteCode } from './core/invite'
 import type { ChatMessage, State } from './core/models'
 import {
   applyControlEvents,
+  createCall,
   createChannel,
   createCircle,
+  endCall,
+  joinCall,
   joinCircle,
+  leaveCall,
   loadState,
   saveState,
   sendMessage,
@@ -448,7 +452,8 @@ function App() {
     if (cmd === '/help') {
       setStatus(
         'Commands: /help  /name <name>  /invite  /settings  /channels  ' +
-          '/channel create|switch <name>  /join <code>',
+          '/channel create|switch <name>  /join <code>  ' +
+          '/call start|join|leave|end',
       )
       return
     }
@@ -510,6 +515,61 @@ function App() {
       joinCircle(next, { circleId, secretHex: parsed.secretHex, name: '', isOwned: false })
       setStatus(`Joined circle ${circleId.slice(0, 8)}. Sync will start shortly.`)
       return
+    }
+
+    if (cmd === '/call') {
+      const sub = parts[1]?.toLowerCase()
+      if (!sub || sub === 'start') {
+        const msg = await createCall(next)
+        if (!msg) throw new Error('No active circle/channel')
+        setStatus(`Call started. Others can /call join to join.`)
+        return
+      }
+      if (sub === 'join') {
+        const circleId = next.currentCircleId
+        if (!circleId) throw new Error('No active circle')
+        // Find the first active call in the current channel.
+        const channelId = next.currentChannelId ?? 'general'
+        const call = Object.values(next.activeCalls).find(
+          (c) => c.circleId === circleId && c.channelId === channelId,
+        )
+        if (!call) throw new Error('No active call in this channel')
+        const msg = await joinCall(next, call.sessionId)
+        if (!msg) throw new Error('Failed to join call')
+        setStatus(`Joined call (${call.participants.length} participants)`)
+        return
+      }
+      if (sub === 'leave') {
+        const circleId = next.currentCircleId
+        if (!circleId) throw new Error('No active circle')
+        const channelId = next.currentChannelId ?? 'general'
+        const call = Object.values(next.activeCalls).find(
+          (c) =>
+            c.circleId === circleId &&
+            c.channelId === channelId &&
+            c.participants.includes(next.node.nodeId),
+        )
+        if (!call) throw new Error('Not in a call in this channel')
+        await leaveCall(next, call.sessionId)
+        setStatus('Left the call.')
+        return
+      }
+      if (sub === 'end') {
+        const circleId = next.currentCircleId
+        if (!circleId) throw new Error('No active circle')
+        const channelId = next.currentChannelId ?? 'general'
+        const call = Object.values(next.activeCalls).find(
+          (c) =>
+            c.circleId === circleId &&
+            c.channelId === channelId &&
+            c.hostNodeId === next.node.nodeId,
+        )
+        if (!call) throw new Error('No call to end (you are not the host)')
+        await endCall(next, call.sessionId)
+        setStatus('Call ended.')
+        return
+      }
+      throw new Error('Usage: /call start|join|leave|end')
     }
 
     throw new Error('Unknown command. Try /help')
@@ -586,6 +646,16 @@ function App() {
   const currentCircle = currentCircleId ? state.circles[currentCircleId] : undefined
   const currentChannelId = state.currentChannelId ?? 'general'
   const messages = visibleMessages(state)
+
+  // Active call in the current channel (if any).
+  const activeCall = currentCircleId
+    ? Object.values(state.activeCalls).find(
+        (c) => c.circleId === currentCircleId && c.channelId === currentChannelId,
+      ) ?? null
+    : null
+  const amInCall = activeCall?.participants.includes(state.node.nodeId) ?? false
+  const amHost = activeCall?.hostNodeId === state.node.nodeId
+
   const inviteCode = currentCircle
     ? makeInviteCode(
         currentCircle.secretHex,
@@ -694,6 +764,14 @@ function App() {
             <span className="tui-header-peers">
               {peerCount} peer{peerCount !== 1 ? 's' : ''}
             </span>
+            {activeCall && (
+              <>
+                <span className="tui-header-sep"> │ </span>
+                <span className="tui-sync-status">
+                  {amInCall ? '◈' : '◇'} call({activeCall.participants.length})
+                </span>
+              </>
+            )}
             {rendezvousBase && (
               <>
                 <span className="tui-header-sep"> │ </span>
@@ -741,6 +819,87 @@ function App() {
               </div>
             )
           })}
+          {/* Call panel — shown when a call is active in the current channel */}
+          {currentCircleId && (
+            <div className="tui-call-panel">
+              {activeCall ? (
+                <>
+                  <div className="tui-sidebar-section">
+                    {activeCall.callState === 'active' ? '◈ Call' : '◇ Call (pending)'}
+                  </div>
+                  {activeCall.participants.map((nodeId) => (
+                    <div key={nodeId} className="tui-call-participant">
+                      {nodeId === activeCall.hostNodeId ? '★' : '·'}{' '}
+                      {nodeId.slice(0, 8)}
+                      {nodeId === state.node.nodeId ? ' (you)' : ''}
+                    </div>
+                  ))}
+                  <div className="tui-call-actions">
+                    {amInCall ? (
+                      <>
+                        <button
+                          className="tui-btn"
+                          onClick={() =>
+                            void (async () => {
+                              const next = { ...state, activeCalls: { ...state.activeCalls } }
+                              await leaveCall(next, activeCall.sessionId)
+                              await persist(next)
+                            })()
+                          }
+                        >
+                          Leave
+                        </button>
+                        {amHost && (
+                          <button
+                            className="tui-btn"
+                            onClick={() =>
+                              void (async () => {
+                                const next = { ...state, activeCalls: { ...state.activeCalls } }
+                                await endCall(next, activeCall.sessionId)
+                                await persist(next)
+                              })()
+                            }
+                          >
+                            End
+                          </button>
+                        )}
+                      </>
+                    ) : (
+                      <button
+                        className="tui-btn primary"
+                        onClick={() =>
+                          void (async () => {
+                            const next = { ...state, activeCalls: { ...state.activeCalls } }
+                            await joinCall(next, activeCall.sessionId)
+                            await persist(next)
+                          })()
+                        }
+                      >
+                        Join
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="tui-sidebar-section">◇ Call</div>
+                  <button
+                    className="tui-btn"
+                    style={{ margin: '4px 8px' }}
+                    onClick={() =>
+                      void (async () => {
+                        const next = { ...state, activeCalls: { ...state.activeCalls } }
+                        await createCall(next)
+                        await persist(next)
+                      })()
+                    }
+                  >
+                    Start call
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </aside>
 
         {/* Message log */}
