@@ -50,6 +50,10 @@ export interface State {
   node: NodeConfig
   settings: {
     rendezvousBase: string
+    /** Optional TURN server URL, e.g. turn:your-server:3478 */
+    turnUrl?: string
+    turnUsername?: string
+    turnCredential?: string
   }
   circles: Record<string, Circle>
   channels: Record<string, Record<string, Channel>>

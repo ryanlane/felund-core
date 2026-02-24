@@ -241,7 +241,7 @@
   color: #555577;
 }
 
-.tui-footer kbd {
+kbd {
   background: #252540;
   border: 1px solid #3a3a5a;
   border-radius: 2px;
@@ -405,4 +405,37 @@
   .tui-sidebar {
     display: none;
   }
+}
+
+/* ── Help modal content ─────────────────────────────────────────────────── */
+
+.tui-help-content {
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.tui-help-section {
+  color: #00c8c0;
+  font-weight: bold;
+  margin-top: 0.7rem;
+  margin-bottom: 0.15rem;
+}
+
+.tui-help-section:first-child { margin-top: 0; }
+
+.tui-help-row {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.05rem 0 0.05rem 0.5rem;
+}
+
+.tui-help-cmd {
+  color: #d0d0d8;
+  font-weight: bold;
+  min-width: 13rem;
+  flex: 0 0 auto;
+}
+
+.tui-help-desc {
+  color: #7777aa;
 }

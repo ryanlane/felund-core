@@ -28,10 +28,27 @@ import {
 import { pushMessages, pullMessages, openRelayWS } from './network/relay'
 import type { WsStatus } from './network/relay'
 import { WebRTCTransport } from './network/transport'
+import { WebRTCCallManager } from './network/call'
+import type { CallPeerState } from './network/call'
 
 const formatTime = (ts: number): string => {
   const d = new Date(ts * 1000)
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+// Deterministic per-peer color palette — mirrors the Python TUI _peer_color palette.
+const PEER_COLORS = [
+  '#00c8c0', '#e8c44a', '#c060a0', '#00e0d8',
+  '#ffe04a', '#ff70c8', '#e07820', '#ff5080',
+  '#78c830', '#6090e0', '#e07868', '#60b0e0',
+]
+
+const peerColor = (nodeId: string): string => {
+  let h = 5381
+  for (let i = 0; i < nodeId.length; i++) {
+    h = ((h << 5) + h + nodeId.charCodeAt(i)) | 0
+  }
+  return PEER_COLORS[Math.abs(h) % PEER_COLORS.length]
 }
 
 function App() {
@@ -47,12 +64,25 @@ function App() {
   const [peerCount, setPeerCount] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
   const [showInvite, setShowInvite] = useState(false)
+  const [showHelp, setShowHelp] = useState(false)
   const [inviteCopied, setInviteCopied] = useState(false)
   const [wsLive, setWsLive] = useState(false)
   const wsLiveCountRef = useRef(0)
   const [p2pCount, setP2pCount] = useState(0)
   // Map from circleId → WebRTCTransport (one per circle)
   const webrtcRef = useRef<Map<string, WebRTCTransport>>(new Map())
+
+  // ── Call media state ───────────────────────────────────────────────────────
+  const [isMuted, setIsMuted] = useState(false)
+  const [isVideoOn, setIsVideoOn] = useState(false)
+  const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({})
+  const [callPeerStates, setCallPeerStates] = useState<Record<string, CallPeerState>>({})
+  const callManagerRef = useRef<WebRTCCallManager | null>(null)
+
+  // ── TURN server settings form state ───────────────────────────────────────
+  const [turnUrl, setTurnUrl] = useState('')
+  const [turnUsername, setTurnUsername] = useState('')
+  const [turnCredential, setTurnCredential] = useState('')
 
   // Keep a ref to the latest state so polling closures always see fresh data
   const stateRef = useRef<State | null>(null)
@@ -63,28 +93,37 @@ function App() {
   // Ref for auto-scrolling the message list
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
+  // Ref for focusing the composer input (used by Escape shortcut)
+  const inputRef = useRef<HTMLInputElement>(null)
+
   // ── Auto-scroll on new messages or channel switch ─────────────────────────
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
   }, [state?.messages, state?.currentCircleId, state?.currentChannelId])
 
-  // ── Keyboard shortcuts: F1=Settings, F2=Invite, Escape=close modals ───────
+  // ── Keyboard shortcuts: F1=Help, F2=Invite, F3=Settings, Escape=close+focus ─
 
   useEffect(() => {
     const handler = (e: globalThis.KeyboardEvent) => {
       if (e.key === 'F1') {
         e.preventDefault()
-        setShowSettings((v) => !v)
+        setShowHelp((v) => !v)
       }
       if (e.key === 'F2') {
         e.preventDefault()
         setShowInvite((v) => !v)
       }
+      if (e.key === 'F3') {
+        e.preventDefault()
+        setShowSettings((v) => !v)
+      }
       if (e.key === 'Escape') {
+        setShowHelp(false)
         setShowSettings(false)
         setShowInvite(false)
         setStatus('')
+        inputRef.current?.focus()
       }
     }
     window.addEventListener('keydown', handler)
@@ -99,6 +138,9 @@ function App() {
       setState(loaded)
       setDisplayName(loaded.node.displayName || 'anon')
       setRendezvousInput(loaded.settings.rendezvousBase || '')
+      setTurnUrl(loaded.settings.turnUrl ?? '')
+      setTurnUsername(loaded.settings.turnUsername ?? '')
+      setTurnCredential(loaded.settings.turnCredential ?? '')
     })()
   }, [])
 
@@ -373,6 +415,82 @@ function App() {
     }
   }, [rendezvousBase, circlesKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Call media manager lifecycle ──────────────────────────────────────────
+  // Runs whenever activeCalls or the current circle/channel changes.
+  // Everything is computed from stateRef.current to avoid stale closures.
+
+  useEffect(() => {
+    const s = stateRef.current
+    if (!s) return
+
+    // Compute active call from state (mirrors render body derivation).
+    const circleId = s.currentCircleId
+    const channelId = s.currentChannelId ?? 'general'
+    const call = circleId
+      ? Object.values(s.activeCalls).find(
+          (c) => c.circleId === circleId && c.channelId === channelId,
+        ) ?? null
+      : null
+    const isInCall = call?.participants.includes(s.node.nodeId) ?? false
+
+    if (!isInCall || !call) {
+      callManagerRef.current?.destroy()
+      callManagerRef.current = null
+      setRemoteStreams({})
+      setCallPeerStates({})
+      return
+    }
+
+    const base = normalizeRendezvousBase(s.settings.rendezvousBase)
+    const circle = circleId ? s.circles[circleId] : undefined
+    if (!base || !circle) return
+
+    // Build ICE server list (STUN + optional TURN)
+    const iceServers: RTCIceServer[] = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+    ]
+    if (s.settings.turnUrl) {
+      iceServers.push({
+        urls: s.settings.turnUrl,
+        username: s.settings.turnUsername,
+        credential: s.settings.turnCredential,
+      })
+    }
+
+    // Create manager if entering call for the first time
+    if (!callManagerRef.current) {
+      const mgr = new WebRTCCallManager({
+        nodeId: s.node.nodeId,
+        callSessionId: call.sessionId,
+        rendezvousBase: base,
+        iceServers,
+        onRemoteStream: (peerId, stream) => {
+          setRemoteStreams((prev) => ({ ...prev, [peerId]: stream }))
+        },
+        onRemoteStreamEnd: (peerId) => {
+          setRemoteStreams((prev) => {
+            const next = { ...prev }
+            delete next[peerId]
+            return next
+          })
+        },
+        onPeerStateChange: (peerId, peerState) => {
+          setCallPeerStates((prev) => ({ ...prev, [peerId]: peerState }))
+        },
+      })
+      callManagerRef.current = mgr
+      void mgr.startMedia(isVideoOn)
+    }
+
+    // Connect to any participant we haven't yet connected to
+    const mgr = callManagerRef.current
+    const otherParticipants = call.participants.filter((id) => id !== s.node.nodeId)
+    for (const peerId of otherParticipants) {
+      void mgr.connectToPeer(peerId)
+    }
+  }, [state]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── State persistence helper ──────────────────────────────────────────────
 
   const persist = async (next: State) => {
@@ -450,11 +568,7 @@ function App() {
     const cmd = parts[0]?.toLowerCase()
 
     if (cmd === '/help') {
-      setStatus(
-        'Commands: /help  /name <name>  /invite  /settings  /channels  ' +
-          '/channel create|switch <name>  /join <code>  ' +
-          '/call start|join|leave|end',
-      )
+      setShowHelp(true)
       return
     }
 
@@ -585,6 +699,9 @@ function App() {
       settings: {
         ...state.settings,
         rendezvousBase: normalizeRendezvousBase(rendezvousInput),
+        turnUrl: turnUrl.trim(),
+        turnUsername: turnUsername.trim(),
+        turnCredential: turnCredential.trim(),
       },
     }
     await persist(next)
@@ -827,13 +944,74 @@ function App() {
                   <div className="tui-sidebar-section">
                     {activeCall.callState === 'active' ? '◈ Call' : '◇ Call (pending)'}
                   </div>
-                  {activeCall.participants.map((nodeId) => (
-                    <div key={nodeId} className="tui-call-participant">
-                      {nodeId === activeCall.hostNodeId ? '★' : '·'}{' '}
-                      {nodeId.slice(0, 8)}
-                      {nodeId === state.node.nodeId ? ' (you)' : ''}
+                  {activeCall.participants.map((nodeId) => {
+                    const peerState = nodeId !== state.node.nodeId ? callPeerStates[nodeId] : undefined
+                    return (
+                      <div key={nodeId} className="tui-call-participant">
+                        {nodeId === activeCall.hostNodeId ? '★' : '·'}{' '}
+                        {nodeId.slice(0, 8)}
+                        {nodeId === state.node.nodeId ? ' (you)' : ''}
+                        {peerState && (
+                          <span className={`tui-peer-state ${peerState}`}>
+                            {peerState === 'connected' ? ' ○' : peerState === 'connecting' ? ' ◌' : ' ✕'}
+                          </span>
+                        )}
+                      </div>
+                    )
+                  })}
+                  {/* Video tiles (shown when camera is on) */}
+                  {amInCall && isVideoOn && (
+                    <div className="tui-call-video-grid">
+                      {callManagerRef.current?.localStream && (
+                        <video
+                          autoPlay
+                          playsInline
+                          muted
+                          ref={(el) => {
+                            if (el && callManagerRef.current?.localStream)
+                              el.srcObject = callManagerRef.current.localStream
+                          }}
+                          className="tui-call-video tui-call-video-local"
+                        />
+                      )}
+                      {Object.entries(remoteStreams).map(([peerId, stream]) => (
+                        <video
+                          key={peerId}
+                          autoPlay
+                          playsInline
+                          ref={(el) => {
+                            if (el) el.srcObject = stream
+                          }}
+                          className="tui-call-video"
+                        />
+                      ))}
                     </div>
-                  ))}
+                  )}
+                  {/* Media controls */}
+                  {amInCall && (
+                    <div className="tui-call-media-controls">
+                      <button
+                        className={`tui-btn ${isMuted ? '' : 'primary'}`}
+                        onClick={() => {
+                          const m = !isMuted
+                          setIsMuted(m)
+                          callManagerRef.current?.muteAudio(m)
+                        }}
+                      >
+                        {isMuted ? '⊗ Muted' : '◎ Mic'}
+                      </button>
+                      <button
+                        className={`tui-btn ${isVideoOn ? 'primary' : ''}`}
+                        onClick={() => {
+                          const v = !isVideoOn
+                          setIsVideoOn(v)
+                          void callManagerRef.current?.enableVideo(v)
+                        }}
+                      >
+                        {isVideoOn ? '⊡ Cam' : '⊞ Cam'}
+                      </button>
+                    </div>
+                  )}
                   <div className="tui-call-actions">
                     {amInCall ? (
                       <>
@@ -908,22 +1086,38 @@ function App() {
             {messages.length === 0 && (
               <div className="tui-empty">No messages yet — type below to start chatting.</div>
             )}
-            {messages.map((msg) => (
-              <div key={msg.msgId} className="tui-message">
-                <span className="tui-ts">[{formatTime(msg.createdTs)}]</span>{' '}
-                <span
-                  className={`tui-author${msg.authorNodeId === state.node.nodeId ? ' is-self' : ''}`}
-                >
-                  {msg.displayName}
-                </span>
-                <span className="tui-colon">:</span>{' '}
-                <span className="tui-text">{msg.text}</span>
-              </div>
-            ))}
+            {messages.map((msg) => {
+              const isSelf = msg.authorNodeId === state.node.nodeId
+              return (
+                <div key={msg.msgId} className="tui-message">
+                  <span className="tui-ts">[{formatTime(msg.createdTs)}]</span>{' '}
+                  <span
+                    className={`tui-author${isSelf ? ' is-self' : ''}`}
+                    style={isSelf ? undefined : { color: peerColor(msg.authorNodeId) }}
+                  >
+                    {msg.displayName}
+                  </span>
+                  <span className="tui-colon">:</span>{' '}
+                  <span className="tui-text">{msg.text}</span>
+                </div>
+              )
+            })}
             <div ref={messagesEndRef} />
           </div>
         </div>
       </div>
+
+      {/* Hidden audio elements for remote call streams */}
+      {amInCall &&
+        Object.entries(remoteStreams).map(([peerId, stream]) => (
+          <audio
+            key={peerId}
+            autoPlay
+            ref={(el) => {
+              if (el) el.srcObject = stream
+            }}
+          />
+        ))}
 
       {/* Status bar — click to dismiss */}
       {status && (
@@ -937,6 +1131,7 @@ function App() {
         <span className="tui-prompt">&gt;</span>
         <form className="tui-input-form" onSubmit={handleSend}>
           <input
+            ref={inputRef}
             value={composer}
             onChange={(e) => setComposer(e.target.value)}
             placeholder="Type a message or /command…"
@@ -948,12 +1143,17 @@ function App() {
       {/* Footer */}
       <div className="tui-footer">
         <span>
-          <kbd>F1</kbd> Settings
+          <kbd>F1</kbd> Help
         </span>
         <span>
           <kbd>F2</kbd> Invite
         </span>
-        <span>/help</span>
+        <span>
+          <kbd>F3</kbd> Settings
+        </span>
+        <span>
+          <kbd>Esc</kbd> Focus input
+        </span>
         <span className="tui-footer-node">node: {state.node.nodeId.slice(0, 8)}</span>
       </div>
 
@@ -979,6 +1179,29 @@ function App() {
                   placeholder="https://your-relay-server/api"
                 />
               </label>
+              <label>
+                TURN server <span className="tui-dim">(optional, for calls behind strict NAT)</span>
+                <input
+                  value={turnUrl}
+                  onChange={(e) => setTurnUrl(e.target.value)}
+                  placeholder="turn:your-turn-server:3478"
+                />
+              </label>
+              <label>
+                TURN username
+                <input
+                  value={turnUsername}
+                  onChange={(e) => setTurnUsername(e.target.value)}
+                />
+              </label>
+              <label>
+                TURN credential
+                <input
+                  type="password"
+                  value={turnCredential}
+                  onChange={(e) => setTurnCredential(e.target.value)}
+                />
+              </label>
               <p className="tui-dim" style={{ margin: 0, fontSize: '0.78rem' }}>
                 node: {state.node.nodeId}
               </p>
@@ -992,6 +1215,92 @@ function App() {
               </button>
               <button className="tui-btn primary" onClick={() => void saveSettings()}>
                 Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Help Modal */}
+      {showHelp && (
+        <div className="tui-modal-overlay" onClick={() => setShowHelp(false)}>
+          <div className="tui-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="tui-modal-header">felundchat — commands</div>
+            <div className="tui-modal-body">
+              <div className="tui-help-content">
+                <div className="tui-help-section">General</div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd">/help</span>
+                  <span className="tui-help-desc">Show this screen</span>
+                </div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd">/name &lt;name&gt;</span>
+                  <span className="tui-help-desc">Change your display name</span>
+                </div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd">/invite</span>
+                  <span className="tui-help-desc">Show invite code for the active circle</span>
+                </div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd">/settings</span>
+                  <span className="tui-help-desc">Open settings (display name, relay URL)</span>
+                </div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd">/join &lt;code&gt;</span>
+                  <span className="tui-help-desc">Join a circle using an invite code</span>
+                </div>
+                <div className="tui-help-section">Channels</div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd">/channels</span>
+                  <span className="tui-help-desc">List channels in the active circle</span>
+                </div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd">/channel create &lt;name&gt;</span>
+                  <span className="tui-help-desc">Create a new channel</span>
+                </div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd">/channel switch &lt;name&gt;</span>
+                  <span className="tui-help-desc">Switch to another channel</span>
+                </div>
+                <div className="tui-help-section">Calls</div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd">/call start</span>
+                  <span className="tui-help-desc">Start a call in the current channel</span>
+                </div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd">/call join</span>
+                  <span className="tui-help-desc">Join an active call</span>
+                </div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd">/call leave</span>
+                  <span className="tui-help-desc">Leave the current call</span>
+                </div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd">/call end</span>
+                  <span className="tui-help-desc">End the call (host only)</span>
+                </div>
+                <div className="tui-help-section">Keyboard shortcuts</div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd"><kbd>F1</kbd></span>
+                  <span className="tui-help-desc">Help</span>
+                </div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd"><kbd>F2</kbd></span>
+                  <span className="tui-help-desc">Invite code</span>
+                </div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd"><kbd>F3</kbd></span>
+                  <span className="tui-help-desc">Settings</span>
+                </div>
+                <div className="tui-help-row">
+                  <span className="tui-help-cmd"><kbd>Escape</kbd></span>
+                  <span className="tui-help-desc">Close modals · focus input</span>
+                </div>
+              </div>
+            </div>
+            <div className="tui-modal-actions">
+              <button className="tui-btn primary" onClick={() => setShowHelp(false)}>
+                Close
               </button>
             </div>
           </div>

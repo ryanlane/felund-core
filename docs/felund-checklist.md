@@ -246,18 +246,19 @@ Track each item as `- [ ]` (pending), `- [x]` (done), or `- [-]` (skipped/deferr
 
 ### Web client
 
-- [ ] Add `getUserMedia` request (audio first; video as opt-in)
-- [ ] Add local media track to existing `RTCPeerConnection` used for DataChannel
-- [ ] Handle `ontrack` event for remote stream
-- [ ] Render remote video/audio in call UI
-- [ ] Add mute/unmute and camera toggle controls
-- [ ] Add connection health states: `connecting` / `connected` / `reconnecting` / `failed`
-- [ ] Implement adaptive resolution hints via `RTCRtpSender.setParameters`
+- [x] Add `getUserMedia` request (audio first; video as opt-in); fallback to audio-only if video fails
+- [x] Create separate `WebRTCCallManager` in [chat-webclient/src/network/call.ts](../chat-webclient/src/network/call.ts) — one media `RTCPeerConnection` per call participant, independent of Phase 3 DataChannel connections
+- [x] Handle `ontrack` event; collect into per-peer `MediaStream`
+- [x] Render remote audio via hidden `<audio autoPlay>` elements; remote video via `.tui-call-video-grid` tiles
+- [x] Add mute/unmute (`muteAudio()` → `track.enabled = !muted`) and camera toggle (`enableVideo()` → `addTrack` + renegotiation)
+- [x] Peer connection health states: `connecting` / `connected` / `failed` with badge indicators (◌ / ○ / ✕) in call participant list
+- [-] Adaptive resolution hints via `RTCRtpSender.setParameters` — deferred; `getUserMedia` constraints cover MVP
+- [x] Call manager lifecycle `useEffect` in [chat-webclient/src/App.tsx](../chat-webclient/src/App.tsx) — creates/destroys manager with call membership, calls `startMedia` + `connectToPeer` for each participant
 
 ### TURN support
 
-- [ ] Add TURN server configuration field to settings (optional)
-- [ ] Include TURN credentials in `RTCPeerConnection` `iceServers` when configured
+- [x] Add TURN server configuration fields to settings modal (`turnUrl`, `turnUsername`, `turnCredential`)
+- [x] Include TURN credentials in `RTCPeerConnection` `iceServers` when configured (built as `CallManagerConfig.iceServers` in App.tsx)
 - [ ] Document self-hosted TURN options (coturn)
 
 ### Python client (optional)
