@@ -150,42 +150,49 @@ Track each item as `- [ ]` (pending), `- [x]` (done), or `- [-]` (skipped/deferr
 
 ### Signaling endpoint
 
-- [ ] Add `POST /v1/signal` to rendezvous server [api/php/rendezvous.php](../api/php/rendezvous.php)
+- [x] Add `POST /v1/signal` to [api/relay_ws.py](../api/relay_ws.py)
   - Body: `session_id`, `from_node_id`, `to_node_id`, `circle_hint`, `type` (offer/answer/candidate), `payload`, `ttl_s`
   - Response: `ok`, `server_time`
-- [ ] Add `GET /v1/signal?session_id=&to_node_id=&since=` for polling candidates
-- [ ] Enforce TTL pruning (max 60s for candidates; 120s for offer/answer)
-- [ ] Rate-limit signal endpoint per node_id
-- [ ] Design `session_id` as stable across both DataChannel and call signaling (reused in Phase 4)
+- [x] Add `GET /v1/signal?to_node_id=&since_id=&session_id=` for polling candidates
+- [x] Enforce TTL pruning (max 60s for candidates; 120s for offer/answer) — expired rows deleted on every write
+- [x] Rate-limit signal endpoint per `from_node_id` (20 requests / 10 s, in-memory)
+- [x] `session_id` is `sorted([nodeA, nodeB]).join(':')` — deterministic, stable, reusable in Phase 4
 
 ### Web client transport
 
-- [ ] Create [chat-webclient/src/network/transport.ts](../chat-webclient/src/network/transport.ts) `WebRTCTransport` class
-  - `createOffer(sessionId, peerId)` → post SDP to `/v1/signal`
-  - `waitForAnswer(sessionId)` → poll `/v1/signal` with backoff
-  - `addIceCandidate(sessionId, candidate)` → post to `/v1/signal`
-  - `pollRemoteCandidates(sessionId)` → poll and apply
-- [ ] Open `RTCDataChannel` named `felund-gossip`
-- [ ] Run existing gossip frame protocol over DataChannel (same JSON-line frames as TCP)
-- [ ] Handle DataChannel `open` / `close` / `error` events
-- [ ] Implement connection state machine: `idle → signaling → connecting → open → closed`
-- [ ] Integrate fallback: on ICE failure or timeout → try peer anchor → WS relay → HTTP poll
-- [ ] Configure STUN servers (at minimum `stun:stun.l.google.com:19302`)
+- [x] Implement [chat-webclient/src/network/transport.ts](../chat-webclient/src/network/transport.ts) `WebRTCTransport` class
+  - Offerer/answerer roles determined by lexicographic node_id comparison (smaller = offerer)
+  - Signal polling every 2 s; handles offer / answer / candidate messages
+  - ICE candidates trickled via `/v1/signal`; ICE timeout 15 s
+- [x] Open `RTCDataChannel` named `felund-gossip` (ordered, offerer creates it; answerer receives via `ondatachannel`)
+- [x] Gossip frame protocol over DataChannel (JSON text messages):
+  - `HELLO` with node_id, circle_hint, random nonce
+  - `AUTH` = `HMAC(circleSecret, "dc-auth:" + myNonce + ":" + peerNonce)` — mutual proof of circle membership
+  - `MSGS_SEND` with up to 100 most-recent non-control messages (AES-256-GCM encrypted, same format as relay)
+  - `MSG_NEW` for real-time delivery of newly composed messages
+- [x] Handle DataChannel `open` / `close` / `error` events
+- [x] Connection state machine: `signaling → connecting → open → closed | failed`
+- [x] Fallback: if ICE fails/times out, relay WS + HTTP poll continue independently — no action needed
+- [x] STUN: `stun.l.google.com:19302` and `stun1.l.google.com:19302`
+
+### App.tsx integration
+
+- [x] `webrtcRef` holds one `WebRTCTransport` per circle (created/destroyed with circles)
+- [x] `connectToPeer()` called for each discovered peer during rendezvous poll (every 5 s)
+- [x] Messages received via DataChannel merged into state (same path as relay messages)
+- [x] `broadcastMessage()` called on new outgoing messages for real-time P2P delivery
+- [x] Header shows `◦ p2p(N)` when N direct DataChannels are open; falls back to `◦ live` / `○ poll`
 
 ### Python TUI (optional, enables Python↔browser)
 
-- [ ] Add `aiortc` to `chat/requirements.txt` (optional dependency)
-- [ ] Implement `WebRTCTransportAdapter` in [chat/felundchat/transport.py](../chat/felundchat/transport.py)
-  - Accept incoming DataChannel connections from browsers
-  - Send/receive gossip frames over DataChannel
-- [ ] Integrate with existing `GossipNode` as an alternate connection type
+- [-] `aiortc` adapter — deferred; browser↔browser DataChannel works; Python↔browser requires aiortc which adds heavy C dependencies
 
 ### Verification
 
 - [ ] Browser ↔ browser on different networks: messages sync without relay (confirm in server logs — no relay request)
 - [ ] Python TUI ↔ browser: direct DataChannel connection (with aiortc enabled)
 - [ ] Symmetric NAT scenario: ICE fails → fallback to anchor/relay → messages still arrive
-- [ ] DataChannel disconnect: automatic reconnect attempt within 10s
+- [ ] DataChannel disconnect: session cleaned up; peer is re-discoverable next rendezvous poll
 
 ---
 

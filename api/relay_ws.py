@@ -31,15 +31,25 @@ import aiohttp
 import aiosqlite
 from aiohttp import web
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 MAX_ENDPOINTS = 16
 MAX_LIMIT = 200
 PING_INTERVAL_S = 15
 WS_BUFFER_S = 120  # seconds of messages to send to new WS subscribers on connect
 
+# Signal TTLs
+SIGNAL_TTL_CANDIDATE_S = 60
+SIGNAL_TTL_OFFER_ANSWER_S = 120
+SIGNAL_RATE_LIMIT = 20   # POST /v1/signal requests per node per window
+SIGNAL_RATE_WINDOW_S = 10.0
+
 # ── In-memory rooms: circle_hint → set of live WebSocket connections ──────────
 
 _rooms: Dict[str, Set[web.WebSocketResponse]] = defaultdict(set)
+
+# ── In-memory rate limiter for signaling ──────────────────────────────────────
+# node_id → (request_count, window_start)
+_signal_rate: Dict[str, tuple] = {}
 
 
 # ── CORS middleware ───────────────────────────────────────────────────────────
@@ -99,7 +109,43 @@ async def _init_db(db: aiosqlite.Connection) -> None:
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_rmsg_exp ON relay_messages (expires_at)"
     )
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS signal_messages (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id  TEXT    NOT NULL,
+            from_node   TEXT    NOT NULL,
+            to_node     TEXT    NOT NULL,
+            type        TEXT    NOT NULL,
+            payload     TEXT    NOT NULL,
+            created_at  INTEGER NOT NULL,
+            expires_at  INTEGER NOT NULL
+        )
+    """)
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sig_to ON signal_messages (to_node, id)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sig_exp ON signal_messages (expires_at)"
+    )
     await db.commit()
+
+
+def _check_signal_rate(node_id: str) -> bool:
+    """Return True if the request is within rate limits, False if throttled."""
+    now = time.time()
+    entry = _signal_rate.get(node_id)
+    if entry is not None:
+        count, window_start = entry
+        if now - window_start < SIGNAL_RATE_WINDOW_S:
+            if count >= SIGNAL_RATE_LIMIT:
+                return False
+            _signal_rate[node_id] = (count + 1, window_start)
+        else:
+            _signal_rate[node_id] = (1, now)
+    else:
+        _signal_rate[node_id] = (1, now)
+    return True
 
 
 # ── Response helpers ──────────────────────────────────────────────────────────
@@ -342,6 +388,112 @@ async def route_messages_get(request: web.Request) -> web.Response:
     return _ok({"ok": True, "messages": messages, "server_time": now})
 
 
+# ── Route: WebRTC signaling POST ─────────────────────────────────────────────
+
+async def route_signal_post(request: web.Request) -> web.Response:
+    try:
+        data: dict = await request.json()
+    except Exception:
+        return _err("Invalid JSON body")
+
+    session_id = data.get("session_id", "")
+    from_node = data.get("from_node_id", "")
+    to_node = data.get("to_node_id", "")
+    circle_hint = data.get("circle_hint", "")
+    sig_type = data.get("type", "")
+    payload = data.get("payload", "")
+
+    if not isinstance(session_id, str) or not (8 <= len(session_id) <= 256):
+        return _err("session_id must be a string (8–256 chars)")
+    if not isinstance(from_node, str) or len(from_node) < 8:
+        return _err("from_node_id required (8+ chars)")
+    if not isinstance(to_node, str) or len(to_node) < 8:
+        return _err("to_node_id required (8+ chars)")
+    if not isinstance(circle_hint, str) or len(circle_hint) < 8:
+        return _err("circle_hint required (8+ chars)")
+    if sig_type not in ("offer", "answer", "candidate"):
+        return _err("type must be offer, answer, or candidate")
+    if not isinstance(payload, str) or len(payload) > 65536:
+        return _err("payload must be a string (max 64 KB)")
+
+    if not _check_signal_rate(from_node):
+        return _err("Rate limit exceeded — slow down", status=429)
+
+    ttl_raw = data.get("ttl_s", None)
+    if sig_type == "candidate":
+        max_ttl = SIGNAL_TTL_CANDIDATE_S
+    else:
+        max_ttl = SIGNAL_TTL_OFFER_ANSWER_S
+    if isinstance(ttl_raw, (int, float)):
+        ttl_s = min(max(int(ttl_raw), 10), max_ttl)
+    else:
+        ttl_s = max_ttl
+
+    now = int(time.time())
+    expires_at = now + ttl_s
+
+    db = _db(request)
+    await db.execute(
+        """INSERT INTO signal_messages
+           (session_id, from_node, to_node, type, payload, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (session_id, from_node, to_node, sig_type, payload, now, expires_at),
+    )
+    await db.execute("DELETE FROM signal_messages WHERE expires_at <= ?", (now,))
+    await db.commit()
+
+    return _ok({"ok": True, "server_time": now})
+
+
+# ── Route: WebRTC signaling GET ───────────────────────────────────────────────
+
+async def route_signal_get(request: web.Request) -> web.Response:
+    to_node = request.rel_url.query.get("to_node_id", "")
+    if len(to_node) < 8:
+        return _err("to_node_id required (8+ chars)")
+
+    since_raw = request.rel_url.query.get("since_id", "0")
+    since_id = int(since_raw) if since_raw.lstrip("-").isdigit() else 0
+
+    session_id = request.rel_url.query.get("session_id", "")
+
+    now = int(time.time())
+    db = _db(request)
+
+    if session_id:
+        async with db.execute(
+            "SELECT id, session_id, from_node, to_node, type, payload, created_at"
+            " FROM signal_messages"
+            " WHERE to_node = ? AND session_id = ? AND id > ? AND expires_at > ?"
+            " ORDER BY id ASC LIMIT 50",
+            (to_node, session_id, since_id, now),
+        ) as cur:
+            rows = await cur.fetchall()
+    else:
+        async with db.execute(
+            "SELECT id, session_id, from_node, to_node, type, payload, created_at"
+            " FROM signal_messages"
+            " WHERE to_node = ? AND id > ? AND expires_at > ?"
+            " ORDER BY id ASC LIMIT 50",
+            (to_node, since_id, now),
+        ) as cur:
+            rows = await cur.fetchall()
+
+    signals = [
+        {
+            "id": row["id"],
+            "session_id": row["session_id"],
+            "from_node": row["from_node"],
+            "to_node": row["to_node"],
+            "type": row["type"],
+            "payload": row["payload"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+    return _ok({"ok": True, "signals": signals, "server_time": now})
+
+
 # ── Route: WebSocket subscription ─────────────────────────────────────────────
 
 async def route_ws(request: web.Request) -> web.WebSocketResponse:
@@ -431,6 +583,8 @@ def make_app(db_path: str) -> web.Application:
     app.router.add_post("/v1/messages", route_messages_post)
     app.router.add_get("/v1/messages", route_messages_get)
     app.router.add_get("/v1/relay/ws", route_ws)
+    app.router.add_post("/v1/signal", route_signal_post)
+    app.router.add_get("/v1/signal", route_signal_get)
 
     return app
 

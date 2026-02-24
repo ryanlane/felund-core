@@ -23,6 +23,7 @@ import {
 } from './network/rendezvous'
 import { pushMessages, pullMessages, openRelayWS } from './network/relay'
 import type { WsStatus } from './network/relay'
+import { WebRTCTransport } from './network/transport'
 
 const formatTime = (ts: number): string => {
   const d = new Date(ts * 1000)
@@ -45,6 +46,9 @@ function App() {
   const [inviteCopied, setInviteCopied] = useState(false)
   const [wsLive, setWsLive] = useState(false)
   const wsLiveCountRef = useRef(0)
+  const [p2pCount, setP2pCount] = useState(0)
+  // Map from circleId → WebRTCTransport (one per circle)
+  const webrtcRef = useRef<Map<string, WebRTCTransport>>(new Map())
 
   // Keep a ref to the latest state so polling closures always see fresh data
   const stateRef = useRef<State | null>(null)
@@ -208,12 +212,19 @@ function App() {
         }
       }
 
-      // ── 3. Peer count (registration already done above) ───────────────────
+      // ── 3. Peer count + WebRTC connections ────────────────────────────────
       const s2 = stateRef.current
       if (s2?.currentCircleId && !stopped) {
         try {
           const peers = await lookupPeers(base, s2.node.nodeId, s2.currentCircleId, 50)
           if (!stopped) setPeerCount(peers.length)
+          // Attempt direct WebRTC DataChannel connections to discovered peers.
+          const transport = webrtcRef.current.get(s2.currentCircleId)
+          if (transport && !stopped) {
+            for (const peer of peers) {
+              void transport.connectToPeer(peer.node_id)
+            }
+          }
         } catch {
           /* non-fatal */
         }
@@ -296,6 +307,68 @@ function App() {
     }
   }, [rendezvousBase, circlesKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── WebRTC DataChannel — direct peer-to-peer transport ────────────────────
+  // One WebRTCTransport per circle.  Signal polling runs inside the transport.
+  // connectToPeer() is called from the relay sync loop whenever peers are
+  // discovered; here we only manage the transport lifecycle.
+
+  useEffect(() => {
+    const base = normalizeRendezvousBase(rendezvousBase)
+    const s = stateRef.current
+    if (!base || !s || circlesKey === '') return
+
+    // Tear down transports for circles that no longer exist.
+    for (const [cid, t] of webrtcRef.current) {
+      if (!(cid in s.circles)) {
+        t.destroy()
+        webrtcRef.current.delete(cid)
+      }
+    }
+
+    // Create transports for newly joined circles.
+    for (const [circleId, circle] of Object.entries(s.circles)) {
+      if (webrtcRef.current.has(circleId)) continue
+      const transport = new WebRTCTransport({
+        nodeId: s.node.nodeId,
+        circleId,
+        secretHex: circle.secretHex,
+        rendezvousBase: base,
+        getLocalMessages: () => Object.values(stateRef.current?.messages ?? {}),
+        onMessages: (msgs) => {
+          setState((prev) => {
+            if (!prev) return prev
+            const newMsgs = msgs.filter((m) => !prev.messages[m.msgId])
+            if (newMsgs.length === 0) return prev
+            const next = {
+              ...prev,
+              messages: { ...prev.messages },
+              channels: { ...prev.channels },
+              circles: { ...prev.circles },
+            }
+            for (const msg of newMsgs) next.messages[msg.msgId] = msg
+            applyControlEvents(next, newMsgs)
+            void saveState(next)
+            return next
+          })
+        },
+        onPeerCountChange: () => {
+          const total = [...webrtcRef.current.values()].reduce(
+            (sum, t) => sum + t.openCount,
+            0,
+          )
+          setP2pCount(total)
+        },
+      })
+      webrtcRef.current.set(circleId, transport)
+    }
+
+    return () => {
+      for (const t of webrtcRef.current.values()) t.destroy()
+      webrtcRef.current.clear()
+      setP2pCount(0)
+    }
+  }, [rendezvousBase, circlesKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── State persistence helper ──────────────────────────────────────────────
 
   const persist = async (next: State) => {
@@ -349,7 +422,16 @@ function App() {
       if (input.startsWith('/')) {
         await handleCommand(next, input)
       } else {
+        const prevMsgIds = new Set(Object.keys(state.messages))
         await sendMessage(next, input)
+        // Broadcast newly added messages to WebRTC peers for real-time delivery.
+        const circleId = next.currentCircleId
+        const transport = circleId ? webrtcRef.current.get(circleId) : undefined
+        if (transport) {
+          for (const msg of Object.values(next.messages)) {
+            if (!prevMsgIds.has(msg.msgId)) transport.broadcastMessage(msg)
+          }
+        }
       }
       await persist(next)
     } catch (error) {
@@ -615,8 +697,8 @@ function App() {
             {rendezvousBase && (
               <>
                 <span className="tui-header-sep"> │ </span>
-                <span className={wsLive ? 'tui-sync-status' : 'tui-dim'}>
-                  {wsLive ? '◦ live' : '○ poll'}
+                <span className={p2pCount > 0 || wsLive ? 'tui-sync-status' : 'tui-dim'}>
+                  {p2pCount > 0 ? `◦ p2p(${p2pCount})` : wsLive ? '◦ live' : '○ poll'}
                 </span>
               </>
             )}
