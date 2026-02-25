@@ -369,8 +369,11 @@ export class WebRTCCallManager {
       if (!resp.ok) return
       const data = (await resp.json()) as { ok: boolean; signals?: SignalData[] }
       for (const sig of data.signals ?? []) {
-        if (!sig.type.startsWith('media-')) continue
+        // Advance past ALL signals (including Phase-3 offer/answer/candidate)
+        // so Phase-3 churn can't push Phase-5 signals beyond the relay's
+        // LIMIT 50 page and make them invisible forever.
         this.lastSignalId = Math.max(this.lastSignalId, sig.id)
+        if (!sig.type.startsWith('media-')) continue
         await this.handleSignal(sig)
       }
     } catch {
