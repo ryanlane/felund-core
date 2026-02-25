@@ -37,6 +37,26 @@ npm install
 npm run dev
 ```
 
+## E2E tests (Phase 5 call media)
+
+These tests spin up the WebRTC media call flow across two Chromium contexts
+using Playwright and the Python relay server.
+
+```bash
+cd chat-webclient
+pip install -r ../api/relay_requirements.txt
+npm install
+npx playwright install
+npm run test:e2e
+```
+
+Optional overrides:
+
+- Use an existing relay server:
+  `FELUND_RELAY_EXTERNAL=1 FELUND_RELAY_BASE=http://127.0.0.1:8765 npm run test:e2e`
+- Choose a Python executable for the relay server:
+  `FELUND_RELAY_PYTHON=python3 npm run test:e2e`
+
 ## Production build
 
 ```bash

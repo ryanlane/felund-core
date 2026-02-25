@@ -21,6 +21,8 @@
  * peer is unavailable but the call control plane (text) is unaffected.
  */
 
+import { sha256Hex } from '../core/crypto'
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type CallPeerState = 'connecting' | 'connected' | 'failed'
@@ -40,6 +42,7 @@ interface CallPeerSession {
 export interface CallManagerConfig {
   nodeId: string
   callSessionId: string
+  circleId: string
   rendezvousBase: string
   iceServers: RTCIceServer[]
   onRemoteStream: (peerId: string, stream: MediaStream) => void
@@ -70,6 +73,10 @@ export class WebRTCCallManager {
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private lastSignalId = 0
   private stopped = false
+  /** Resolves when startMedia() has finished (success or failure). */
+  private mediaReady: Promise<void> = Promise.resolve()
+  /** Cached circle_hint (16-hex SHA-256 prefix of circleId). */
+  private circleHint: string | null = null
 
   constructor(config: CallManagerConfig) {
     this.config = config
@@ -83,22 +90,25 @@ export class WebRTCCallManager {
    * Must be called before connectToPeer so tracks are ready for addTrack().
    */
   async startMedia(video: boolean): Promise<void> {
-    try {
-      this.localStream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video,
-      })
-    } catch (err) {
-      console.warn('[call] getUserMedia failed:', err)
-      // Fallback: try audio-only if video was requested and failed
-      if (video) {
-        try {
-          this.localStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-        } catch (err2) {
-          console.warn('[call] getUserMedia (audio-only fallback) failed:', err2)
+    this.mediaReady = (async () => {
+      try {
+        this.localStream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video,
+        })
+      } catch (err) {
+        console.warn('[call] getUserMedia failed:', err)
+        // Fallback: try audio-only if video was requested and failed
+        if (video) {
+          try {
+            this.localStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+          } catch (err2) {
+            console.warn('[call] getUserMedia (audio-only fallback) failed:', err2)
+          }
         }
       }
-    }
+    })()
+    await this.mediaReady
   }
 
   /**
@@ -113,6 +123,10 @@ export class WebRTCCallManager {
 
     const isInitiator = this.config.nodeId < peerId
     if (!isInitiator) return // Answerer: wait for offer via pollSignals
+
+    // Wait for getUserMedia to complete so tracks are available for the offer.
+    await this.mediaReady
+    if (this.stopped || this.sessions.has(sessionId)) return
 
     const session = this.createPeerSession(sessionId, peerId, true)
     this.sessions.set(sessionId, session)
@@ -352,6 +366,9 @@ export class WebRTCCallManager {
     if (type === 'media-offer') {
       // Answerer path: create session if it doesn't exist
       if (this.sessions.has(session_id)) return
+      // Wait for getUserMedia so local tracks are ready for the answer.
+      await this.mediaReady
+      if (this.sessions.has(session_id)) return
       const session = this.createPeerSession(session_id, from_node, false)
       this.sessions.set(session_id, session)
 
@@ -399,21 +416,28 @@ export class WebRTCCallManager {
   ): Promise<void> {
     if (this.stopped) return
     try {
-      await fetch(`${this.config.rendezvousBase}/v1/signal`, {
+      if (!this.circleHint) {
+        this.circleHint = (await sha256Hex(this.config.circleId)).slice(0, 16)
+      }
+      const resp = await fetch(`${this.config.rendezvousBase}/v1/signal`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionId,
           from_node_id: this.config.nodeId,
           to_node_id: toNode,
-          circle_hint: '',
+          circle_hint: this.circleHint,
           type,
           payload,
           ttl_s: type === 'media-candidate' ? 60 : 120,
         }),
       })
-    } catch {
-      /* best-effort */
+      if (!resp.ok) {
+        const body = await resp.text()
+        console.warn('[call] postSignal failed', resp.status, type, body.slice(0, 80))
+      }
+    } catch (err) {
+      console.warn('[call] postSignal error:', err)
     }
   }
 }

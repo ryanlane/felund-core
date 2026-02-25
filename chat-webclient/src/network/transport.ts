@@ -412,7 +412,7 @@ export class WebRTCTransport {
   private async syncMessages(session: PeerSession): Promise<void> {
     const msgs = this.config
       .getLocalMessages()
-      .filter((m) => m.circleId === this.config.circleId && m.channelId !== '__control')
+      .filter((m) => m.circleId === this.config.circleId)
       .sort((a, b) => a.createdTs - b.createdTs)
       .slice(-MAX_SYNC_MSGS)
 

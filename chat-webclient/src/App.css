@@ -256,6 +256,86 @@ kbd {
   color: #3a3a5a;
 }
 
+/* Footer buttons — look like text on desktop, become large tap targets on mobile */
+.tui-footer-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  opacity: 0.75;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.tui-footer-btn:hover { opacity: 1; }
+.tui-footer-btn.is-active { opacity: 1; color: #00c8a8; }
+.tui-footer-btn.is-active kbd { color: #00c8a8; border-color: #00c8a8; }
+/* has-call: someone started a call and you haven't joined yet */
+.tui-footer-btn.has-call { opacity: 1; color: #78c830; }
+.tui-footer-btn.has-call kbd { color: #78c830; border-color: #78c830; }
+
+/* ── iOS-style tab bar on touch devices ────────────────────────────────── */
+
+@media (pointer: coarse) {
+  .tui-footer {
+    height: auto;
+    gap: 0;
+    padding: 0;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    background: rgba(12, 12, 22, 0.97);
+    border-top: 0.5px solid #2a2a4a;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    align-items: stretch;
+    font-size: 0.6rem;
+  }
+
+  .tui-footer-btn {
+    flex: 1;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 7px 4px 5px;
+    gap: 3px;
+    opacity: 1;
+    min-height: 52px;
+    color: #55557a;
+    border-radius: 0;
+    letter-spacing: 0;
+  }
+
+  /* kbd becomes the tab icon — strip its box styling */
+  .tui-footer-btn kbd {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.95rem;
+    font-family: inherit;
+    color: inherit;
+    line-height: 1;
+  }
+
+  .tui-footer-btn span {
+    font-size: 0.6rem;
+    line-height: 1;
+  }
+
+  .tui-footer-btn.is-active { color: #00c8a8; }
+  .tui-footer-btn.is-active kbd { color: #00c8a8; }
+  .tui-footer-btn.has-call { color: #78c830; }
+  .tui-footer-btn.has-call kbd { color: #78c830; }
+  .tui-footer-btn:active { background: rgba(255, 255, 255, 0.05); }
+
+  .tui-footer-node { display: none; }
+}
+
 /* ── Modals ────────────────────────────────────────────────────────────── */
 
 .tui-modal-overlay {
@@ -439,3 +519,48 @@ kbd {
 .tui-help-desc {
   color: #7777aa;
 }
+
+/* ── Sidebar call section — clickable to open call modal ────────────────── */
+
+.tui-sidebar-section-clickable {
+  cursor: pointer;
+}
+
+.tui-sidebar-section-clickable:hover {
+  color: #6a6a9a;
+}
+
+/* ── Call modal ──────────────────────────────────────────────────────────── */
+
+.tui-call-modal {
+  width: min(520px, 94vw);
+}
+
+.tui-call-modal-participants {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+/* ── Call media ──────────────────────────────────────────────────────────── */
+
+.tui-call-video-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.tui-call-video {
+  flex: 1 1 200px;
+  max-height: 180px;
+  object-fit: cover;
+  background: #0a0a14;
+  border: 1px solid #2a2a4a;
+}
+
+.tui-call-video-local { opacity: 0.75; }
+
+.tui-peer-state { font-size: 0.72rem; }
+.tui-peer-state.connected  { color: #00c8a8; }
+.tui-peer-state.connecting { color: #e8c44a; }
+.tui-peer-state.failed     { color: #ff6655; }

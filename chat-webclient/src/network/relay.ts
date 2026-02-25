@@ -149,7 +149,8 @@ const fromWire = async (
 
 /**
  * Push a batch of messages to the relay for a given circle.
- * Silently skips __control channel messages.
+ * All channel messages including __control (call events, channel events) are pushed
+ * so that web clients receive them via relay poll/WS.
  */
 export const pushMessages = async (
   base: string,
@@ -157,15 +158,14 @@ export const pushMessages = async (
   secretHex: string,
   msgs: ChatMessage[],
 ): Promise<void> => {
-  const toSend = msgs.filter((m) => m.channelId !== '__control')
-  if (toSend.length === 0) return
+  if (msgs.length === 0) return
 
   const hint = await circleHintFor(circleId)
   const key = await deriveMessageKey(secretHex)
 
   // POST in batches of 50 (server limit)
-  for (let i = 0; i < toSend.length; i += 50) {
-    const batch = toSend.slice(i, i + 50)
+  for (let i = 0; i < msgs.length; i += 50) {
+    const batch = msgs.slice(i, i + 50)
     const messages = await Promise.all(batch.map((m) => toWire(key, m)))
     const response = await fetch(withV1(base, 'messages'), {
       method: 'POST',

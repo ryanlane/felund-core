@@ -65,6 +65,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [showInvite, setShowInvite] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
+  const [showCall, setShowCall] = useState(false)
   const [inviteCopied, setInviteCopied] = useState(false)
   const [wsLive, setWsLive] = useState(false)
   const wsLiveCountRef = useRef(0)
@@ -118,10 +119,15 @@ function App() {
         e.preventDefault()
         setShowSettings((v) => !v)
       }
+      if (e.key === 'F4') {
+        e.preventDefault()
+        setShowCall((v) => !v)
+      }
       if (e.key === 'Escape') {
         setShowHelp(false)
         setShowSettings(false)
         setShowInvite(false)
+        setShowCall(false)
         setStatus('')
         inputRef.current?.focus()
       }
@@ -463,6 +469,7 @@ function App() {
       const mgr = new WebRTCCallManager({
         nodeId: s.node.nodeId,
         callSessionId: call.sessionId,
+        circleId: circleId ?? '',
         rendezvousBase: base,
         iceServers,
         onRemoteStream: (peerId, stream) => {
@@ -800,6 +807,7 @@ function App() {
                   onChange={(e) => setDisplayName(e.target.value)}
                   placeholder="anon"
                   autoFocus
+                  data-testid="setup-display-name"
                 />
               </label>
               <div className="tui-tab-row">
@@ -807,6 +815,7 @@ function App() {
                   type="button"
                   className={`tui-tab ${mode === 'host' ? 'active' : ''}`}
                   onClick={() => setMode('host')}
+                  data-testid="setup-tab-host"
                 >
                   Host
                 </button>
@@ -814,6 +823,7 @@ function App() {
                   type="button"
                   className={`tui-tab ${mode === 'join' ? 'active' : ''}`}
                   onClick={() => setMode('join')}
+                  data-testid="setup-tab-join"
                 >
                   Join
                 </button>
@@ -825,6 +835,7 @@ function App() {
                     value={circleName}
                     onChange={(e) => setCircleName(e.target.value)}
                     placeholder="my-group"
+                    data-testid="setup-circle-name"
                   />
                 </label>
               ) : (
@@ -835,6 +846,7 @@ function App() {
                     onChange={(e) => setInviteInput(e.target.value)}
                     rows={4}
                     placeholder="Paste invite code here…"
+                    data-testid="setup-invite-code"
                   />
                 </label>
               )}
@@ -844,12 +856,13 @@ function App() {
                   value={rendezvousInput}
                   onChange={(e) => setRendezvousInput(e.target.value)}
                   placeholder="https://your-relay-server/api"
+                  data-testid="setup-rendezvous"
                 />
               </label>
               {status && <p className="tui-error">{status}</p>}
             </div>
             <div className="tui-modal-actions">
-              <button type="submit" className="tui-btn primary">
+              <button type="submit" className="tui-btn primary" data-testid="setup-submit">
                 {mode === 'host' ? 'Create circle' : 'Join circle'}
               </button>
             </div>
@@ -936,146 +949,32 @@ function App() {
               </div>
             )
           })}
-          {/* Call panel — shown when a call is active in the current channel */}
+          {/* Call panel — status only; F4 opens the call modal for actions */}
           {currentCircleId && (
             <div className="tui-call-panel">
-              {activeCall ? (
-                <>
-                  <div className="tui-sidebar-section">
-                    {activeCall.callState === 'active' ? '◈ Call' : '◇ Call (pending)'}
-                  </div>
-                  {activeCall.participants.map((nodeId) => {
-                    const peerState = nodeId !== state.node.nodeId ? callPeerStates[nodeId] : undefined
-                    return (
-                      <div key={nodeId} className="tui-call-participant">
-                        {nodeId === activeCall.hostNodeId ? '★' : '·'}{' '}
-                        {nodeId.slice(0, 8)}
-                        {nodeId === state.node.nodeId ? ' (you)' : ''}
-                        {peerState && (
-                          <span className={`tui-peer-state ${peerState}`}>
-                            {peerState === 'connected' ? ' ○' : peerState === 'connecting' ? ' ◌' : ' ✕'}
-                          </span>
-                        )}
-                      </div>
-                    )
-                  })}
-                  {/* Video tiles (shown when camera is on) */}
-                  {amInCall && isVideoOn && (
-                    <div className="tui-call-video-grid">
-                      {callManagerRef.current?.localStream && (
-                        <video
-                          autoPlay
-                          playsInline
-                          muted
-                          ref={(el) => {
-                            if (el && callManagerRef.current?.localStream)
-                              el.srcObject = callManagerRef.current.localStream
-                          }}
-                          className="tui-call-video tui-call-video-local"
-                        />
+              <div
+                className="tui-sidebar-section tui-sidebar-section-clickable"
+                onClick={() => setShowCall(true)}
+              >
+                {activeCall ? (amInCall ? '◈ Call' : '◇ Call (pending)') : '◇ Call'}
+              </div>
+              {activeCall &&
+                activeCall.participants.map((nodeId) => {
+                  const peerState =
+                    nodeId !== state.node.nodeId ? callPeerStates[nodeId] : undefined
+                  return (
+                    <div key={nodeId} className="tui-call-participant">
+                      {nodeId === activeCall.hostNodeId ? '★' : '·'}{' '}
+                      {nodeId.slice(0, 8)}
+                      {nodeId === state.node.nodeId ? ' (you)' : ''}
+                      {peerState && (
+                        <span className={`tui-peer-state ${peerState}`}>
+                          {peerState === 'connected' ? ' ○' : peerState === 'connecting' ? ' ◌' : ' ✕'}
+                        </span>
                       )}
-                      {Object.entries(remoteStreams).map(([peerId, stream]) => (
-                        <video
-                          key={peerId}
-                          autoPlay
-                          playsInline
-                          ref={(el) => {
-                            if (el) el.srcObject = stream
-                          }}
-                          className="tui-call-video"
-                        />
-                      ))}
                     </div>
-                  )}
-                  {/* Media controls */}
-                  {amInCall && (
-                    <div className="tui-call-media-controls">
-                      <button
-                        className={`tui-btn ${isMuted ? '' : 'primary'}`}
-                        onClick={() => {
-                          const m = !isMuted
-                          setIsMuted(m)
-                          callManagerRef.current?.muteAudio(m)
-                        }}
-                      >
-                        {isMuted ? '⊗ Muted' : '◎ Mic'}
-                      </button>
-                      <button
-                        className={`tui-btn ${isVideoOn ? 'primary' : ''}`}
-                        onClick={() => {
-                          const v = !isVideoOn
-                          setIsVideoOn(v)
-                          void callManagerRef.current?.enableVideo(v)
-                        }}
-                      >
-                        {isVideoOn ? '⊡ Cam' : '⊞ Cam'}
-                      </button>
-                    </div>
-                  )}
-                  <div className="tui-call-actions">
-                    {amInCall ? (
-                      <>
-                        <button
-                          className="tui-btn"
-                          onClick={() =>
-                            void (async () => {
-                              const next = { ...state, activeCalls: { ...state.activeCalls } }
-                              await leaveCall(next, activeCall.sessionId)
-                              await persist(next)
-                            })()
-                          }
-                        >
-                          Leave
-                        </button>
-                        {amHost && (
-                          <button
-                            className="tui-btn"
-                            onClick={() =>
-                              void (async () => {
-                                const next = { ...state, activeCalls: { ...state.activeCalls } }
-                                await endCall(next, activeCall.sessionId)
-                                await persist(next)
-                              })()
-                            }
-                          >
-                            End
-                          </button>
-                        )}
-                      </>
-                    ) : (
-                      <button
-                        className="tui-btn primary"
-                        onClick={() =>
-                          void (async () => {
-                            const next = { ...state, activeCalls: { ...state.activeCalls } }
-                            await joinCall(next, activeCall.sessionId)
-                            await persist(next)
-                          })()
-                        }
-                      >
-                        Join
-                      </button>
-                    )}
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="tui-sidebar-section">◇ Call</div>
-                  <button
-                    className="tui-btn"
-                    style={{ margin: '4px 8px' }}
-                    onClick={() =>
-                      void (async () => {
-                        const next = { ...state, activeCalls: { ...state.activeCalls } }
-                        await createCall(next)
-                        await persist(next)
-                      })()
-                    }
-                  >
-                    Start call
-                  </button>
-                </>
-              )}
+                  )
+                })}
             </div>
           )}
         </aside>
@@ -1113,6 +1012,7 @@ function App() {
           <audio
             key={peerId}
             autoPlay
+            data-testid="call-remote-audio"
             ref={(el) => {
               if (el) el.srcObject = stream
             }}
@@ -1140,20 +1040,23 @@ function App() {
         </form>
       </div>
 
-      {/* Footer */}
+      {/* Footer — tappable on mobile (iOS tab bar style) */}
       <div className="tui-footer">
-        <span>
-          <kbd>F1</kbd> Help
-        </span>
-        <span>
-          <kbd>F2</kbd> Invite
-        </span>
-        <span>
-          <kbd>F3</kbd> Settings
-        </span>
-        <span>
-          <kbd>Esc</kbd> Focus input
-        </span>
+        <button className={`tui-footer-btn${showHelp ? ' is-active' : ''}`} onClick={() => setShowHelp((v) => !v)}>
+          <kbd>F1</kbd><span>Help</span>
+        </button>
+        <button className={`tui-footer-btn${showInvite ? ' is-active' : ''}`} onClick={() => setShowInvite((v) => !v)} data-testid="footer-invite">
+          <kbd>F2</kbd><span>Invite</span>
+        </button>
+        <button className={`tui-footer-btn${showSettings ? ' is-active' : ''}`} onClick={() => setShowSettings((v) => !v)}>
+          <kbd>F3</kbd><span>Settings</span>
+        </button>
+        <button className={`tui-footer-btn${amInCall || showCall ? ' is-active' : activeCall && !amInCall ? ' has-call' : ''}`} onClick={() => setShowCall((v) => !v)} data-testid="footer-call">
+          <kbd>F4</kbd><span>Call</span>
+        </button>
+        <button className="tui-footer-btn" onClick={() => inputRef.current?.focus()}>
+          <kbd>Esc</kbd><span>Focus</span>
+        </button>
         <span className="tui-footer-node">node: {state.node.nodeId.slice(0, 8)}</span>
       </div>
 
@@ -1319,7 +1222,7 @@ function App() {
                 Share this code with others to join{' '}
                 <strong>{currentCircle?.name || 'this circle'}</strong>.
               </p>
-              <pre className="tui-invite-code">{inviteCode}</pre>
+              <pre className="tui-invite-code" data-testid="invite-code">{inviteCode}</pre>
             </div>
             <div className="tui-modal-actions">
               <button className="tui-btn" onClick={() => setShowInvite(false)}>
@@ -1328,6 +1231,185 @@ function App() {
               <button className="tui-btn primary" onClick={() => void copyInviteCode(inviteCode)}>
                 {inviteCopied ? '✓ Copied!' : 'Copy to clipboard'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Call Modal — F4 */}
+      {showCall && currentCircleId && (
+        <div className="tui-modal-overlay" onClick={() => setShowCall(false)}>
+          <div className="tui-modal tui-call-modal" onClick={(e) => e.stopPropagation()} data-testid="call-modal">
+            <div className="tui-modal-header">
+              {amInCall ? '◈ Call' : '◇ Call'}
+              {activeCall && (
+                <span style={{ fontWeight: 'normal', fontSize: '0.78rem', marginLeft: '0.6rem', opacity: 0.75 }}>
+                  {activeCall.participants.length} participant{activeCall.participants.length !== 1 ? 's' : ''}
+                </span>
+              )}
+            </div>
+            <div className="tui-modal-body">
+              {amInCall ? (
+                <>
+                  {/* Video grid — shown when camera is on */}
+                  {isVideoOn && (
+                    <div className="tui-call-video-grid">
+                      {callManagerRef.current?.localStream && (
+                        <video
+                          autoPlay
+                          playsInline
+                          muted
+                          data-testid="call-local-video"
+                          ref={(el) => {
+                            if (el && callManagerRef.current?.localStream)
+                              el.srcObject = callManagerRef.current.localStream
+                          }}
+                          className="tui-call-video tui-call-video-local"
+                        />
+                      )}
+                      {Object.entries(remoteStreams).map(([peerId, stream]) => (
+                        <video
+                          key={peerId}
+                          autoPlay
+                          playsInline
+                          data-testid="call-remote-video"
+                          ref={(el) => {
+                            if (el) el.srcObject = stream
+                          }}
+                          className="tui-call-video"
+                        />
+                      ))}
+                    </div>
+                  )}
+                  {/* Participant list */}
+                  {activeCall && (
+                    <div className="tui-call-modal-participants">
+                      {activeCall.participants.map((nodeId) => {
+                        const peerState =
+                          nodeId !== state.node.nodeId ? callPeerStates[nodeId] : undefined
+                        return (
+                          <div key={nodeId} className="tui-call-participant">
+                            {nodeId === activeCall.hostNodeId ? '★' : '·'}{' '}
+                            {nodeId.slice(0, 8)}
+                            {nodeId === state.node.nodeId ? ' (you)' : ''}
+                            {peerState && (
+                              <span className={`tui-peer-state ${peerState}`}>
+                                {peerState === 'connected'
+                                  ? ' ○'
+                                  : peerState === 'connecting'
+                                    ? ' ◌'
+                                    : ' ✕'}
+                              </span>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p className="tui-dim" style={{ margin: 0 }}>
+                  {activeCall
+                    ? 'A call is active in this channel. Join to connect your audio/video.'
+                    : 'No active call in this channel.'}
+                </p>
+              )}
+            </div>
+            <div className="tui-modal-actions">
+              {amInCall ? (
+                <>
+                  <button
+                    className={`tui-btn ${isMuted ? '' : 'primary'}`}
+                    onClick={() => {
+                      const m = !isMuted
+                      setIsMuted(m)
+                      callManagerRef.current?.muteAudio(m)
+                    }}
+                    data-testid="call-mute"
+                  >
+                    {isMuted ? '⊗ Muted' : '◎ Mic'}
+                  </button>
+                  <button
+                    className={`tui-btn ${isVideoOn ? 'primary' : ''}`}
+                    onClick={() => {
+                      const v = !isVideoOn
+                      setIsVideoOn(v)
+                      void callManagerRef.current?.enableVideo(v)
+                    }}
+                    data-testid="call-cam"
+                  >
+                    {isVideoOn ? '⊡ Cam' : '⊞ Cam'}
+                  </button>
+                  <button
+                    className="tui-btn"
+                    onClick={() =>
+                      void (async () => {
+                        const next = { ...state, activeCalls: { ...state.activeCalls } }
+                        await leaveCall(next, activeCall!.sessionId)
+                        await persist(next)
+                        setShowCall(false)
+                      })()
+                    }
+                    data-testid="call-leave"
+                  >
+                    Leave
+                  </button>
+                  {amHost && (
+                    <button
+                      className="tui-btn"
+                      onClick={() =>
+                        void (async () => {
+                          const next = { ...state, activeCalls: { ...state.activeCalls } }
+                          await endCall(next, activeCall!.sessionId)
+                          await persist(next)
+                          setShowCall(false)
+                        })()
+                      }
+                      data-testid="call-end"
+                    >
+                      End
+                    </button>
+                  )}
+                  <button className="tui-btn" onClick={() => setShowCall(false)} data-testid="call-close">
+                    Close
+                  </button>
+                </>
+              ) : (
+                <>
+                  {!activeCall ? (
+                    <button
+                      className="tui-btn primary"
+                      onClick={() =>
+                        void (async () => {
+                          const next = { ...state, activeCalls: { ...state.activeCalls } }
+                          await createCall(next)
+                          await persist(next)
+                        })()
+                      }
+                      data-testid="call-start"
+                    >
+                      Start call
+                    </button>
+                  ) : (
+                    <button
+                      className="tui-btn primary"
+                      onClick={() =>
+                        void (async () => {
+                          const next = { ...state, activeCalls: { ...state.activeCalls } }
+                          await joinCall(next, activeCall.sessionId)
+                          await persist(next)
+                        })()
+                      }
+                      data-testid="call-join"
+                    >
+                      Join call
+                    </button>
+                  )}
+                  <button className="tui-btn" onClick={() => setShowCall(false)} data-testid="call-cancel">
+                    Cancel
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

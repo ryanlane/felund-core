@@ -411,8 +411,12 @@ async def route_signal_post(request: web.Request) -> web.Response:
         return _err("to_node_id required (8+ chars)")
     if not isinstance(circle_hint, str) or len(circle_hint) < 8:
         return _err("circle_hint required (8+ chars)")
-    if sig_type not in ("offer", "answer", "candidate"):
-        return _err("type must be offer, answer, or candidate")
+    _VALID_SIGNAL_TYPES = {
+        "offer", "answer", "candidate",
+        "media-offer", "media-answer", "media-candidate",
+    }
+    if sig_type not in _VALID_SIGNAL_TYPES:
+        return _err("type must be offer, answer, candidate, media-offer, media-answer, or media-candidate")
     if not isinstance(payload, str) or len(payload) > 65536:
         return _err("payload must be a string (max 64 KB)")
 
@@ -420,7 +424,7 @@ async def route_signal_post(request: web.Request) -> web.Response:
         return _err("Rate limit exceeded — slow down", status=429)
 
     ttl_raw = data.get("ttl_s", None)
-    if sig_type == "candidate":
+    if sig_type in ("candidate", "media-candidate"):
         max_ttl = SIGNAL_TTL_CANDIDATE_S
     else:
         max_ttl = SIGNAL_TTL_OFFER_ANSWER_S
