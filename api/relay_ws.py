@@ -53,6 +53,11 @@ _rooms: Dict[str, Set[web.WebSocketResponse]] = defaultdict(set)
 _signal_rate: Dict[str, tuple] = {}
 
 
+def _log(message: str) -> None:
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    print(f"[relay_ws {ts} UTC] {message}")
+
+
 # ── CORS middleware ───────────────────────────────────────────────────────────
 
 CORS_HEADERS = {
@@ -422,6 +427,7 @@ async def route_signal_post(request: web.Request) -> web.Response:
         return _err("payload must be a string (max 64 KB)")
 
     if not _check_signal_rate(from_node):
+        _log(f"signal POST 429 from={from_node[:8]} session={session_id[:16]} type={sig_type}")
         return _err("Rate limit exceeded — slow down", status=429)
 
     ttl_raw = data.get("ttl_s", None)
@@ -447,6 +453,9 @@ async def route_signal_post(request: web.Request) -> web.Response:
     await db.execute("DELETE FROM signal_messages WHERE expires_at <= ?", (now,))
     await db.commit()
 
+    _log(
+        f"signal POST ok from={from_node[:8]} to={to_node[:8]} type={sig_type} ttl={ttl_s}s"
+    )
     return _ok({"ok": True, "server_time": now})
 
 
@@ -496,6 +505,10 @@ async def route_signal_get(request: web.Request) -> web.Response:
         }
         for row in rows
     ]
+    _log(
+        f"signal GET to={to_node[:8]} since={since_id} count={len(signals)}"
+        + (f" session={session_id[:16]}" if session_id else "")
+    )
     return _ok({"ok": True, "signals": signals, "server_time": now})
 
 
@@ -507,10 +520,11 @@ async def route_ws(request: web.Request) -> web.WebSocketResponse:
     if len(circle_hint) < 8 or not node_id:
         raise web.HTTPBadRequest(text="circle_hint and node_id required")
 
-    ws = web.WebSocketResponse(heartbeat=None)
+    ws = web.WebSocketResponse(heartbeat=PING_INTERVAL_S)
     await ws.prepare(request)
 
     _rooms[circle_hint].add(ws)
+    _log(f"ws connect circle={circle_hint[:8]} node={node_id[:8]}")
 
     # Immediately send buffered messages from the last WS_BUFFER_S seconds
     # so the client catches up without a separate HTTP pull.
@@ -539,26 +553,14 @@ async def route_ws(request: web.Request) -> web.WebSocketResponse:
             json.dumps({"t": "MESSAGES", "messages": buffered, "server_time": now})
         )
 
-    # Keepalive — send PING every PING_INTERVAL_S seconds.
-    async def _ping() -> None:
-        try:
-            while not ws.closed:
-                await asyncio.sleep(PING_INTERVAL_S)
-                if not ws.closed:
-                    await ws.send_str('{"t":"PING"}')
-        except Exception:
-            pass
-
-    ping_task = asyncio.create_task(_ping())
-
     try:
         async for msg in ws:
             if msg.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
                 break
             # PONG and any other client frames are silently accepted.
     finally:
-        ping_task.cancel()
         _rooms[circle_hint].discard(ws)
+        _log(f"ws disconnect circle={circle_hint[:8]} node={node_id[:8]}")
 
     return ws
 
@@ -568,6 +570,7 @@ async def route_ws(request: web.Request) -> web.WebSocketResponse:
 def make_app(db_path: str) -> web.Application:
     app = web.Application(middlewares=[cors_middleware])
     app["db_path"] = db_path
+    app["tasks"] = set()
 
     async def on_startup(app: web.Application) -> None:
         db = await aiosqlite.connect(app["db_path"])
@@ -576,6 +579,17 @@ def make_app(db_path: str) -> web.Application:
         app["db"] = db
 
     async def on_cleanup(app: web.Application) -> None:
+        for circle_ws in list(_rooms.values()):
+            for ws in list(circle_ws):
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+        _rooms.clear()
+        for t in list(app["tasks"]):
+            t.cancel()
+        if app["tasks"]:
+            await asyncio.gather(*app["tasks"], return_exceptions=True)
         await app["db"].close()
 
     app.on_startup.append(on_startup)
@@ -609,5 +623,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     Path(args.db).parent.mkdir(parents=True, exist_ok=True)
-    print(f"[relay_ws] starting on {args.host}:{args.port}  db={args.db}")
+    _log(f"starting on {args.host}:{args.port} db={args.db}")
     web.run_app(make_app(args.db), host=args.host, port=args.port, print=None)

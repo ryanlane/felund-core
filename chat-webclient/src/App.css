@@ -570,3 +570,55 @@ kbd {
   font-size: 0.78rem;
   color: #e8c44a;
 }
+
+/* ── VU meters ─────────────────────────────────────────────────────────────── */
+
+.tui-vu-meters {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.35rem 0.75rem 0.2rem;
+}
+
+.tui-vu-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.tui-vu-label {
+  font-size: 0.7rem;
+  color: #6666aa;
+  width: 2.4rem;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+/* The bar is a single div; level is driven by the --vu custom property
+   written directly from the RAF loop — no React re-renders needed. */
+.tui-vu-bar {
+  --vu: 0;
+  position: relative;
+  width: 96px;
+  height: 6px;
+  background: #16162a;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.tui-vu-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform-origin: left center;
+  transform: scaleX(var(--vu));
+  /* green → yellow → red gradient across the full width */
+  background: linear-gradient(
+    to right,
+    #00c8a8 0%,
+    #00c8a8 65%,
+    #e8c44a 80%,
+    #ff6655 95%
+  );
+  border-radius: 3px;
+}
