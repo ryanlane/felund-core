@@ -564,3 +564,9 @@ kbd {
 .tui-peer-state.connected  { color: #00c8a8; }
 .tui-peer-state.connecting { color: #e8c44a; }
 .tui-peer-state.failed     { color: #ff6655; }
+
+.tui-call-no-mic {
+  padding: 0.25rem 0.75rem;
+  font-size: 0.78rem;
+  color: #e8c44a;
+}

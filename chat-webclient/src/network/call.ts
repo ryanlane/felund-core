@@ -131,6 +131,14 @@ export class WebRTCCallManager {
     const session = this.createPeerSession(sessionId, peerId, true)
     this.sessions.set(sessionId, session)
 
+    // Block onnegotiationneeded from firing renegotiate() while the initial
+    // offer is in flight.  addTrack() queues onnegotiationneeded as a
+    // macrotask; if we didn't guard here, the macrotask could race with our
+    // own createOffer(), causing two concurrent setLocalDescription() calls
+    // with mismatched SDPs and a 'failed' connection.  negotiating stays true
+    // until the media-answer handler clears it.
+    session.negotiating = true
+
     // Add all local tracks before creating the offer
     if (this.localStream) {
       for (const track of this.localStream.getTracks()) {

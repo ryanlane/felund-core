@@ -1014,7 +1014,10 @@ function App() {
             autoPlay
             data-testid="call-remote-audio"
             ref={(el) => {
-              if (el) el.srcObject = stream
+              if (el) {
+                el.srcObject = stream
+                void el.play()
+              }
             }}
           />
         ))}
@@ -1279,6 +1282,12 @@ function App() {
                           className="tui-call-video"
                         />
                       ))}
+                    </div>
+                  )}
+                  {/* Mic status — warn if getUserMedia failed */}
+                  {!callManagerRef.current?.localStream?.getAudioTracks().length && (
+                    <div className="tui-call-no-mic">
+                      ⚠ No microphone — check browser permissions
                     </div>
                   )}
                   {/* Participant list */}
