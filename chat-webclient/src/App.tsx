@@ -1257,6 +1257,31 @@ function App() {
             <div className="tui-modal-body">
               {amInCall ? (
                 <>
+                  <div className="tui-dim" style={{ fontSize: '0.72rem', marginBottom: '0.6rem' }}>
+                    <div>
+                      local audio: {callManagerRef.current?.localStream?.getAudioTracks().length ?? 0}
+                      {' '}enabled:{' '}
+                      {callManagerRef.current?.localStream?.getAudioTracks().filter((t) => t.enabled).length ?? 0}
+                    </div>
+                    <div>
+                      local video: {callManagerRef.current?.localStream?.getVideoTracks().length ?? 0}
+                      {' '}enabled:{' '}
+                      {callManagerRef.current?.localStream?.getVideoTracks().filter((t) => t.enabled).length ?? 0}
+                    </div>
+                    <div>
+                      remote streams: {Object.keys(remoteStreams).length}
+                      {' '}audio:{' '}
+                      {Object.values(remoteStreams).reduce(
+                        (sum, s) => sum + s.getAudioTracks().length,
+                        0,
+                      )}
+                      {' '}video:{' '}
+                      {Object.values(remoteStreams).reduce(
+                        (sum, s) => sum + s.getVideoTracks().length,
+                        0,
+                      )}
+                    </div>
+                  </div>
                   {/* Video grid — shown when camera is on */}
                   {isVideoOn && (
                     <div className="tui-call-video-grid">
