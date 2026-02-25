@@ -61,6 +61,10 @@ interface SignalData {
 
 const ICE_TIMEOUT_MS = 20_000
 const SIGNAL_POLL_MS = 2_000
+const SIGNAL_BACKOFF_BASE_MS = 500
+const SIGNAL_BACKOFF_MAX_MS = 5_000
+const CANDIDATE_FLUSH_MS = 250
+const CANDIDATE_BATCH = 6
 
 // ── WebRTCCallManager ─────────────────────────────────────────────────────────
 
@@ -77,6 +81,10 @@ export class WebRTCCallManager {
   private mediaReady: Promise<void> = Promise.resolve()
   /** Cached circle_hint (16-hex SHA-256 prefix of circleId). */
   private circleHint: string | null = null
+  private signalBackoffUntil = 0
+  private signalBackoffMs = 0
+  private candidateQueue: Array<{ sessionId: string; peerId: string; payload: string }> = []
+  private candidateFlushTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(config: CallManagerConfig) {
     this.config = config
@@ -89,7 +97,7 @@ export class WebRTCCallManager {
    * Acquire getUserMedia and store the local stream.
    * Must be called before connectToPeer so tracks are ready for addTrack().
    */
-  async startMedia(video: boolean): Promise<void> {
+  async startMedia(video: boolean): Promise<boolean> {
     this.mediaReady = (async () => {
       try {
         this.localStream = await navigator.mediaDevices.getUserMedia({
@@ -109,6 +117,7 @@ export class WebRTCCallManager {
       }
     })()
     await this.mediaReady
+    return (this.localStream?.getAudioTracks().length ?? 0) > 0
   }
 
   /**
@@ -257,7 +266,12 @@ export class WebRTCCallManager {
 
     pc.onicecandidate = (event) => {
       if (this.stopped || !event.candidate) return
-      void this.postSignal(sessionId, peerId, 'media-candidate', JSON.stringify(event.candidate))
+      this.candidateQueue.push({
+        sessionId,
+        peerId,
+        payload: JSON.stringify(event.candidate),
+      })
+      this.scheduleCandidateFlush()
     }
 
     pc.onconnectionstatechange = () => {
@@ -423,6 +437,7 @@ export class WebRTCCallManager {
     payload: string,
   ): Promise<void> {
     if (this.stopped) return
+    if (type === 'media-candidate' && Date.now() < this.signalBackoffUntil) return
     try {
       if (!this.circleHint) {
         this.circleHint = (await sha256Hex(this.config.circleId)).slice(0, 16)
@@ -441,11 +456,45 @@ export class WebRTCCallManager {
         }),
       })
       if (!resp.ok) {
+        if (resp.status === 429) {
+          this.signalBackoffMs = this.signalBackoffMs
+            ? Math.min(this.signalBackoffMs * 2, SIGNAL_BACKOFF_MAX_MS)
+            : SIGNAL_BACKOFF_BASE_MS
+          this.signalBackoffUntil = Date.now() + this.signalBackoffMs
+        }
         const body = await resp.text()
         console.warn('[call] postSignal failed', resp.status, type, body.slice(0, 80))
+        return
       }
+      this.signalBackoffMs = 0
+      this.signalBackoffUntil = 0
     } catch (err) {
       console.warn('[call] postSignal error:', err)
+    }
+  }
+
+  private scheduleCandidateFlush(): void {
+    if (this.candidateFlushTimer !== null) return
+    this.candidateFlushTimer = setTimeout(() => {
+      this.candidateFlushTimer = null
+      void this.flushCandidateQueue()
+    }, CANDIDATE_FLUSH_MS)
+  }
+
+  private async flushCandidateQueue(): Promise<void> {
+    if (this.stopped || this.candidateQueue.length === 0) return
+    if (Date.now() < this.signalBackoffUntil) {
+      this.scheduleCandidateFlush()
+      return
+    }
+
+    const batch = this.candidateQueue.splice(0, CANDIDATE_BATCH)
+    for (const item of batch) {
+      await this.postSignal(item.sessionId, item.peerId, 'media-candidate', item.payload)
+    }
+
+    if (this.candidateQueue.length > 0) {
+      this.scheduleCandidateFlush()
     }
   }
 }

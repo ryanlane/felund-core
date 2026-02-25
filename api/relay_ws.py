@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -40,8 +41,8 @@ WS_BUFFER_S = 120  # seconds of messages to send to new WS subscribers on connec
 # Signal TTLs
 SIGNAL_TTL_CANDIDATE_S = 60
 SIGNAL_TTL_OFFER_ANSWER_S = 120
-SIGNAL_RATE_LIMIT = 20   # POST /v1/signal requests per node per window
-SIGNAL_RATE_WINDOW_S = 10.0
+SIGNAL_RATE_LIMIT = int(os.environ.get("FELUND_SIGNAL_RATE_LIMIT", "20"))
+SIGNAL_RATE_WINDOW_S = float(os.environ.get("FELUND_SIGNAL_RATE_WINDOW_S", "10.0"))
 
 # ── In-memory rooms: circle_hint → set of live WebSocket connections ──────────
 

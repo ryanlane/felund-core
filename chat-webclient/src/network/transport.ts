@@ -44,6 +44,10 @@ const STUN_SERVERS: RTCIceServer[] = [
 const ICE_TIMEOUT_MS = 15_000
 const SIGNAL_POLL_MS = 2_000
 const MAX_SYNC_MSGS = 100
+const SIGNAL_BACKOFF_BASE_MS = 500
+const SIGNAL_BACKOFF_MAX_MS = 5_000
+const CANDIDATE_FLUSH_MS = 250
+const CANDIDATE_BATCH = 6
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -184,6 +188,10 @@ export class WebRTCTransport {
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private stopped = false
   private cachedHint = ''
+  private signalBackoffUntil = 0
+  private signalBackoffMs = 0
+  private candidateQueue: Array<{ sessionId: string; peerId: string; payload: string }> = []
+  private candidateFlushTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(config: WebRTCTransportConfig) {
     this.config = config
@@ -275,12 +283,12 @@ export class WebRTCTransport {
 
     pc.onicecandidate = (event) => {
       if (this.stopped || !event.candidate) return
-      void this.postSignal(
+      this.candidateQueue.push({
         sessionId,
         peerId,
-        'candidate',
-        JSON.stringify(event.candidate),
-      )
+        payload: JSON.stringify(event.candidate),
+      })
+      this.scheduleCandidateFlush()
     }
 
     pc.onconnectionstatechange = () => {
@@ -537,6 +545,10 @@ export class WebRTCTransport {
     } else if (type === 'answer') {
       const session = this.sessions.get(session_id)
       if (!session) return
+      if (session.pc.signalingState !== 'have-local-offer') {
+        console.warn('[webrtc] ignoring answer in state', session.pc.signalingState)
+        return
+      }
       try {
         await session.pc.setRemoteDescription(
           JSON.parse(payload) as RTCSessionDescriptionInit,
@@ -564,9 +576,10 @@ export class WebRTCTransport {
     payload: string,
   ): Promise<void> {
     if (this.stopped) return
+    if (type === 'candidate' && Date.now() < this.signalBackoffUntil) return
     const hint = this.cachedHint || (await circleHintFor(this.config.circleId))
     try {
-      await fetch(`${this.config.rendezvousBase}/v1/signal`, {
+      const resp = await fetch(`${this.config.rendezvousBase}/v1/signal`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -579,8 +592,44 @@ export class WebRTCTransport {
           ttl_s: type === 'candidate' ? 60 : 120,
         }),
       })
+      if (!resp.ok) {
+        if (resp.status === 429) {
+          this.signalBackoffMs = this.signalBackoffMs
+            ? Math.min(this.signalBackoffMs * 2, SIGNAL_BACKOFF_MAX_MS)
+            : SIGNAL_BACKOFF_BASE_MS
+          this.signalBackoffUntil = Date.now() + this.signalBackoffMs
+        }
+        return
+      }
+      this.signalBackoffMs = 0
+      this.signalBackoffUntil = 0
     } catch {
       /* network error — signals are best-effort */
+    }
+  }
+
+  private scheduleCandidateFlush(): void {
+    if (this.candidateFlushTimer !== null) return
+    this.candidateFlushTimer = setTimeout(() => {
+      this.candidateFlushTimer = null
+      void this.flushCandidateQueue()
+    }, CANDIDATE_FLUSH_MS)
+  }
+
+  private async flushCandidateQueue(): Promise<void> {
+    if (this.stopped || this.candidateQueue.length === 0) return
+    if (Date.now() < this.signalBackoffUntil) {
+      this.scheduleCandidateFlush()
+      return
+    }
+
+    const batch = this.candidateQueue.splice(0, CANDIDATE_BATCH)
+    for (const item of batch) {
+      await this.postSignal(item.sessionId, item.peerId, 'candidate', item.payload)
+    }
+
+    if (this.candidateQueue.length > 0) {
+      this.scheduleCandidateFlush()
     }
   }
 }

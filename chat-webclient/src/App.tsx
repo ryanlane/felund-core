@@ -447,8 +447,9 @@ function App() {
       return
     }
 
+    if (!circleId) return
     const base = normalizeRendezvousBase(s.settings.rendezvousBase)
-    const circle = circleId ? s.circles[circleId] : undefined
+    const circle = s.circles[circleId]
     if (!base || !circle) return
 
     // Build ICE server list (STUN + optional TURN)
@@ -469,7 +470,7 @@ function App() {
       const mgr = new WebRTCCallManager({
         nodeId: s.node.nodeId,
         callSessionId: call.sessionId,
-        circleId: circleId ?? '',
+        circleId,
         rendezvousBase: base,
         iceServers,
         onRemoteStream: (peerId, stream) => {
@@ -487,7 +488,12 @@ function App() {
         },
       })
       callManagerRef.current = mgr
-      void mgr.startMedia(isVideoOn)
+      void (async () => {
+        const ok = await mgr.startMedia(isVideoOn)
+        if (!ok) {
+          setStatus('Microphone access failed — check permissions or input device.')
+        }
+      })()
     }
 
     // Connect to any participant we haven't yet connected to
@@ -1014,10 +1020,7 @@ function App() {
             autoPlay
             data-testid="call-remote-audio"
             ref={(el) => {
-              if (el) {
-                el.srcObject = stream
-                void el.play()
-              }
+              if (el) el.srcObject = stream
             }}
           />
         ))}
@@ -1282,12 +1285,6 @@ function App() {
                           className="tui-call-video"
                         />
                       ))}
-                    </div>
-                  )}
-                  {/* Mic status — warn if getUserMedia failed */}
-                  {!callManagerRef.current?.localStream?.getAudioTracks().length && (
-                    <div className="tui-call-no-mic">
-                      ⚠ No microphone — check browser permissions
                     </div>
                   )}
                   {/* Participant list */}
