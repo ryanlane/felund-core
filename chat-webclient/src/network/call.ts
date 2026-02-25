@@ -35,7 +35,11 @@ interface CallPeerSession {
   state: CallPeerState
   remoteStream: MediaStream
   iceTimer: ReturnType<typeof setTimeout> | null
-  /** Guard: prevents re-entrant renegotiation while one is already in flight. */
+  /**
+   * True while a local offer is outstanding (initial or renegotiation).
+   * Cleared by the media-answer handler so that the flag covers the full
+   * round-trip, not just the createOffer() call.
+   */
   negotiating: boolean
 }
 
@@ -77,6 +81,8 @@ export class WebRTCCallManager {
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private lastSignalId = 0
   private stopped = false
+  /** True while a pollSignals() call is in flight — prevents overlapping polls. */
+  private pollInFlight = false
   /** Resolves when startMedia() has finished (success or failure). */
   private mediaReady: Promise<void> = Promise.resolve()
   /** Cached circle_hint (16-hex SHA-256 prefix of circleId). */
@@ -85,6 +91,11 @@ export class WebRTCCallManager {
   private signalBackoffMs = 0
   private candidateQueue: Array<{ sessionId: string; peerId: string; payload: string }> = []
   private candidateFlushTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * Candidates that arrived before the session existed or before
+   * setRemoteDescription() was called.  Flushed after setRemoteDescription().
+   */
+  private pendingCandidates = new Map<string, RTCIceCandidateInit[]>()
 
   constructor(config: CallManagerConfig) {
     this.config = config
@@ -142,10 +153,10 @@ export class WebRTCCallManager {
 
     // Block onnegotiationneeded from firing renegotiate() while the initial
     // offer is in flight.  addTrack() queues onnegotiationneeded as a
-    // macrotask; if we didn't guard here, the macrotask could race with our
-    // own createOffer(), causing two concurrent setLocalDescription() calls
-    // with mismatched SDPs and a 'failed' connection.  negotiating stays true
-    // until the media-answer handler clears it.
+    // macrotask; without this guard, the macrotask races our own
+    // createOffer(), producing two concurrent setLocalDescription() calls
+    // with mismatched SDPs and an immediate 'failed' connection.
+    // negotiating stays true until the media-answer handler clears it.
     session.negotiating = true
 
     // Add all local tracks before creating the offer
@@ -232,10 +243,15 @@ export class WebRTCCallManager {
       clearInterval(this.pollTimer)
       this.pollTimer = null
     }
+    if (this.candidateFlushTimer !== null) {
+      clearTimeout(this.candidateFlushTimer)
+      this.candidateFlushTimer = null
+    }
     for (const session of this.sessions.values()) {
       this.cleanupSession(session)
     }
     this.sessions.clear()
+    this.pendingCandidates.clear()
     if (this.localStream) {
       for (const track of this.localStream.getTracks()) track.stop()
       this.localStream = null
@@ -275,6 +291,7 @@ export class WebRTCCallManager {
     }
 
     pc.onconnectionstatechange = () => {
+      if (this.stopped) return
       const cs = pc.connectionState
       if (cs === 'connected') {
         this.updateState(session, 'connected')
@@ -283,23 +300,16 @@ export class WebRTCCallManager {
       }
     }
 
-    // Collect incoming tracks into the remote MediaStream
+    // addTrack() is idempotent on MediaStream per spec — no duplicate check needed.
     pc.ontrack = (event) => {
-      for (const track of event.streams[0]?.getTracks() ?? []) {
-        remoteStream.addTrack(track)
-      }
-      if (event.streams[0]) {
-        // Also add from the primary stream directly
-        event.streams[0].getTracks().forEach((t) => {
-          if (!remoteStream.getTracks().includes(t)) remoteStream.addTrack(t)
-        })
-      } else {
-        remoteStream.addTrack(event.track)
-      }
+      if (this.stopped) return
+      const tracks = event.streams[0] ? event.streams[0].getTracks() : [event.track]
+      for (const track of tracks) remoteStream.addTrack(track)
       this.config.onRemoteStream(peerId, remoteStream)
     }
 
-    // Renegotiation (e.g., video track added after initial offer)
+    // Renegotiation (e.g., video track added after initial offer).
+    // Only the initiator ever sends re-offers; the answerer responds.
     pc.onnegotiationneeded = () => {
       if (!isInitiator || session.negotiating || this.stopped) return
       void this.renegotiate(session)
@@ -323,10 +333,11 @@ export class WebRTCCallManager {
       const offer = await session.pc.createOffer()
       await session.pc.setLocalDescription(offer)
       await this.postSignal(session.sessionId, session.peerId, 'media-offer', JSON.stringify(offer))
+      // negotiating stays true until the media-answer arrives and clears it,
+      // preventing a second onnegotiationneeded from starting a concurrent offer.
     } catch (err) {
       console.warn('[call] renegotiation offer failed:', err)
-    } finally {
-      session.negotiating = false
+      session.negotiating = false // clear on error so future renegotiations can fire
     }
   }
 
@@ -341,6 +352,7 @@ export class WebRTCCallManager {
     this.updateState(session, reason)
     this.cleanupSession(session)
     this.sessions.delete(session.sessionId)
+    this.pendingCandidates.delete(session.sessionId)
     this.config.onRemoteStreamEnd(session.peerId)
   }
 
@@ -356,10 +368,24 @@ export class WebRTCCallManager {
     }
   }
 
+  private async flushPendingCandidates(session: CallPeerSession): Promise<void> {
+    const pending = this.pendingCandidates.get(session.sessionId)
+    if (!pending) return
+    this.pendingCandidates.delete(session.sessionId)
+    for (const candidate of pending) {
+      try {
+        await session.pc.addIceCandidate(candidate)
+      } catch {
+        /* stale / duplicate — ignore */
+      }
+    }
+  }
+
   // ── Private: signaling ─────────────────────────────────────────────────────
 
   private async pollSignals(): Promise<void> {
-    if (this.stopped) return
+    if (this.stopped || this.pollInFlight) return
+    this.pollInFlight = true
     try {
       const query = new URLSearchParams({
         to_node_id: this.config.nodeId,
@@ -378,40 +404,59 @@ export class WebRTCCallManager {
       }
     } catch {
       /* network error — retry next poll */
+    } finally {
+      this.pollInFlight = false
     }
   }
 
   private async handleSignal(sig: SignalData): Promise<void> {
     const { session_id, from_node, type, payload } = sig
 
-    // Only process signals intended for sessions we own or can answer
+    // Only process signals for peer sessions this node owns or can answer
     const expectedSessionId = this.makeSessionId(from_node)
     if (session_id !== expectedSessionId) return
 
     if (type === 'media-offer') {
-      // Answerer path: create session if it doesn't exist
-      if (this.sessions.has(session_id)) return
-      // Wait for getUserMedia so local tracks are ready for the answer.
-      await this.mediaReady
-      if (this.sessions.has(session_id)) return
-      const session = this.createPeerSession(session_id, from_node, false)
-      this.sessions.set(session_id, session)
+      const existingSession = this.sessions.get(session_id)
 
-      // Add local tracks before answer
-      if (this.localStream) {
-        for (const track of this.localStream.getTracks()) {
-          session.pc.addTrack(track, this.localStream)
+      if (!existingSession) {
+        // First offer: create the answerer session.
+        await this.mediaReady
+        if (this.sessions.has(session_id)) return // created while awaiting mediaReady
+        const session = this.createPeerSession(session_id, from_node, false)
+        this.sessions.set(session_id, session)
+
+        if (this.localStream) {
+          for (const track of this.localStream.getTracks()) {
+            session.pc.addTrack(track, this.localStream)
+          }
         }
-      }
 
-      try {
-        await session.pc.setRemoteDescription(JSON.parse(payload) as RTCSessionDescriptionInit)
-        const answer = await session.pc.createAnswer()
-        await session.pc.setLocalDescription(answer)
-        await this.postSignal(session_id, from_node, 'media-answer', JSON.stringify(answer))
-      } catch (err) {
-        console.warn('[call] answer failed:', err)
-        this.closeSession(session, 'failed')
+        try {
+          await session.pc.setRemoteDescription(JSON.parse(payload) as RTCSessionDescriptionInit)
+          const answer = await session.pc.createAnswer()
+          await session.pc.setLocalDescription(answer)
+          await this.postSignal(session_id, from_node, 'media-answer', JSON.stringify(answer))
+          await this.flushPendingCandidates(session)
+        } catch (err) {
+          console.warn('[call] answer failed:', err)
+          this.closeSession(session, 'failed')
+        }
+      } else {
+        // Re-offer: renegotiation from the initiator (e.g., they added video).
+        // Skip if a local negotiation is already in flight to avoid SDP glare.
+        if (existingSession.negotiating) return
+        try {
+          await existingSession.pc.setRemoteDescription(
+            JSON.parse(payload) as RTCSessionDescriptionInit,
+          )
+          const answer = await existingSession.pc.createAnswer()
+          await existingSession.pc.setLocalDescription(answer)
+          await this.postSignal(session_id, from_node, 'media-answer', JSON.stringify(answer))
+          await this.flushPendingCandidates(existingSession)
+        } catch (err) {
+          console.warn('[call] re-answer failed:', err)
+        }
       }
     } else if (type === 'media-answer') {
       const session = this.sessions.get(session_id)
@@ -419,14 +464,22 @@ export class WebRTCCallManager {
       try {
         await session.pc.setRemoteDescription(JSON.parse(payload) as RTCSessionDescriptionInit)
         session.negotiating = false
+        await this.flushPendingCandidates(session)
       } catch (err) {
         console.warn('[call] setRemoteDescription (answer) failed:', err)
       }
     } else if (type === 'media-candidate') {
+      const candidate = JSON.parse(payload) as RTCIceCandidateInit
       const session = this.sessions.get(session_id)
-      if (!session) return
+      if (!session || !session.pc.remoteDescription) {
+        // Queue: session not yet created, or setRemoteDescription hasn't run yet
+        const queue = this.pendingCandidates.get(session_id) ?? []
+        queue.push(candidate)
+        this.pendingCandidates.set(session_id, queue)
+        return
+      }
       try {
-        await session.pc.addIceCandidate(JSON.parse(payload) as RTCIceCandidateInit)
+        await session.pc.addIceCandidate(candidate)
       } catch {
         /* stale / duplicate candidate — ignore */
       }
