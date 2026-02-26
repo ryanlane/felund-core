@@ -37,12 +37,19 @@ export const isSameDay = (ts1: number, ts2: number): boolean =>
 
 // Deterministic per-peer color palette — mirrors the Python TUI _peer_color palette.
 const PEER_COLORS = [
-  '#00c8c0', '#e8c44a', '#c060a0', '#00e0d8',
-  '#ffe04a', '#ff70c8', '#e07820', '#ff5080',
-  '#9c9c9c', '#6090e0', '#e07868', '#60b0e0',
+  '#00c8c0', '#cda31a', '#c060a0', '#00e0d8',
+  '#ffe04a', '#ff70c8', '#e66700', '#ff5080',
+  '#9c9c9c', '#2669dd', '#c36f62', '#60b0e0',
 ]
 
-export const peerColor = (nodeId: string): string => {
+export const peerColor = (nodeId: string, allNodeIds?: string[]): string => {
+  if (allNodeIds && allNodeIds.length > 0) {
+    const idx = allNodeIds.indexOf(nodeId)
+    if (idx !== -1) {
+      return PEER_COLORS[idx % PEER_COLORS.length]
+    }
+  }
+
   let h = 5381
   for (let i = 0; i < nodeId.length; i++) {
     h = ((h << 5) + h + nodeId.charCodeAt(i)) | 0

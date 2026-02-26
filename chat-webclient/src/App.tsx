@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import './App.css'
 import { parseInviteCode, makeInviteCode } from './core/invite'
@@ -884,6 +884,17 @@ function App() {
 
   // ── Render ────────────────────────────────────────────────────────────────
 
+  // Uniquely assigned per-circle colors to avoid collisions for <= 12 users.
+  const circleAuthors = useMemo(() => {
+    const circleId = state?.currentCircleId
+    if (!circleId || !state) return []
+    const authors = new Set<string>()
+    for (const m of Object.values(state.messages)) {
+      if (m.circleId === circleId) authors.add(m.authorNodeId)
+    }
+    return Array.from(authors).sort()
+  }, [state?.messages, state?.currentCircleId])
+
   if (!state) {
     return (
       <div className="tui-app">
@@ -1069,7 +1080,7 @@ function App() {
                     >[{formatTime(msg.createdTs, timeFormat)}]</span>{' '}
                     <span
                       className={`tui-author${isSelf ? ' is-self' : ''}`}
-                      style={isSelf ? undefined : { color: peerColor(msg.authorNodeId) }}
+                      style={isSelf ? undefined : { color: peerColor(msg.authorNodeId, circleAuthors) }}
                     >
                       {msg.displayName}
                     </span>
