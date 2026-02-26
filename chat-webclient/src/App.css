@@ -450,6 +450,7 @@ kbd {
 
 .tui-modal-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   justify-content: flex-end;
   padding: 0.55rem 0.85rem;
@@ -535,6 +536,15 @@ kbd {
   }
   .tui-sidebar {
     display: none;
+  }
+  .tui-modal-actions {
+    justify-content: center;
+  }
+  .tui-modal-actions .tui-btn {
+    flex: 1 1 calc(50% - 0.5rem);
+    min-width: fit-content;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.78rem;
   }
 }
 
@@ -626,6 +636,7 @@ kbd {
 
 .tui-call-status-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.4rem;
   padding: 0.3rem 0.85rem;
