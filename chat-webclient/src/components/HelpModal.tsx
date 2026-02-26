@@ -33,6 +33,27 @@ export function HelpModal({ show, onClose }: HelpModalProps) {
               <span className="tui-help-cmd">/join &lt;code&gt;</span>
               <span className="tui-help-desc">Join a circle using an invite code</span>
             </div>
+            <div className="tui-help-section">Circles</div>
+            <div className="tui-help-row">
+              <span className="tui-help-cmd">/circles</span>
+              <span className="tui-help-desc">List all circles</span>
+            </div>
+            <div className="tui-help-row">
+              <span className="tui-help-cmd">/circle name &lt;new-name&gt;</span>
+              <span className="tui-help-desc">Rename current circle (owner only)</span>
+            </div>
+            <div className="tui-help-row">
+              <span className="tui-help-cmd">/circle leave</span>
+              <span className="tui-help-desc">Leave the active circle</span>
+            </div>
+            <div className="tui-help-row">
+              <span className="tui-help-cmd">/circle create &lt;name&gt;</span>
+              <span className="tui-help-desc">Create a new circle</span>
+            </div>
+            <div className="tui-help-row">
+              <span className="tui-help-cmd">/circle join &lt;code&gt;</span>
+              <span className="tui-help-desc">Alias for /join</span>
+            </div>
             <div className="tui-help-section">Channels</div>
             <div className="tui-help-row">
               <span className="tui-help-cmd">/channels</span>
@@ -75,6 +96,10 @@ export function HelpModal({ show, onClose }: HelpModalProps) {
             <div className="tui-help-row">
               <span className="tui-help-cmd"><kbd>F3</kbd></span>
               <span className="tui-help-desc">Settings</span>
+            </div>
+            <div className="tui-help-row">
+              <span className="tui-help-cmd"><kbd>F4</kbd></span>
+              <span className="tui-help-desc">Call</span>
             </div>
             <div className="tui-help-row">
               <span className="tui-help-cmd"><kbd>Escape</kbd></span>

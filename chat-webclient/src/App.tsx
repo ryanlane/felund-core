@@ -12,7 +12,9 @@ import {
   joinCall,
   joinCircle,
   leaveCall,
+  leaveCircle,
   loadState,
+  renameCircle,
   saveState,
   sendMessage,
   visibleMessages,
@@ -628,21 +630,25 @@ function App() {
     setComposer('')
 
     try {
+      const prevMsgIds = new Set(Object.keys(state.messages))
+
       if (input.startsWith('/')) {
         await handleCommand(next, input)
       } else {
-        const prevMsgIds = new Set(Object.keys(state.messages))
         await sendMessage(next, input)
-        // Broadcast newly added messages to WebRTC peers for real-time delivery.
-        const circleId = next.currentCircleId
-        const transport = circleId ? webrtcRef.current.get(circleId) : undefined
-        if (transport) {
-          for (const msg of Object.values(next.messages)) {
-            if (!prevMsgIds.has(msg.msgId)) transport.broadcastMessage(msg)
+      }
+      await persist(next)
+
+      // Broadcast newly added messages to WebRTC peers for real-time delivery.
+      const circleId = next.currentCircleId
+      const transport = circleId ? webrtcRef.current.get(circleId) : undefined
+      if (transport) {
+        for (const msg of Object.values(next.messages)) {
+          if (!prevMsgIds.has(msg.msgId)) {
+            transport.broadcastMessage(msg)
           }
         }
       }
-      await persist(next)
     } catch (error) {
       setStatus(`Error: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -668,6 +674,52 @@ function App() {
       next.node.displayName = newName.slice(0, 40)
       setStatus('Display name updated.')
       return
+    }
+
+    if (cmd === '/circles') {
+      const ids = Object.values(next.circles).map((c) => c.name || c.circleId.slice(0, 8))
+      setStatus(`Circles: ${ids.join(', ')}`)
+      return
+    }
+
+    if (cmd === '/circle') {
+      const sub = parts[1]?.toLowerCase()
+      if (sub === 'create') {
+        const name = parts.slice(2).join(' ').trim()
+        if (!name) throw new Error('Usage: /circle create <name>')
+        await createCircle(next, name)
+        setStatus(`Circle created: ${name}`)
+        return
+      }
+      if (sub === 'name') {
+        if (!next.currentCircleId) throw new Error('No active circle')
+        const newName = parts.slice(2).join(' ').trim()
+        if (!newName) {
+          const c = next.circles[next.currentCircleId]
+          setStatus(`Current circle name: ${c?.name || next.currentCircleId}`)
+          return
+        }
+        await renameCircle(next, next.currentCircleId, newName)
+        setStatus(`Circle renamed to: ${newName}`)
+        return
+      }
+      if (sub === 'join') {
+        const code = parts[2]
+        if (!code) throw new Error('Usage: /circle join <invite-code>')
+        const parsed = parseInviteCode(code)
+        const circleId = (await sha256HexFromRawKey(parsed.secretHex)).slice(0, 24)
+        joinCircle(next, { circleId, secretHex: parsed.secretHex, name: '', isOwned: false })
+        setStatus(`Joined circle ${circleId.slice(0, 8)}. Sync will start shortly.`)
+        return
+      }
+      if (sub === 'leave') {
+        if (!next.currentCircleId) throw new Error('No active circle')
+        const circleId = next.currentCircleId
+        leaveCircle(next, circleId)
+        setStatus(`Left circle ${circleId.slice(0, 8)}.`)
+        return
+      }
+      throw new Error('Usage: /circle create|name|join|leave')
     }
 
     if (cmd === '/invite') {

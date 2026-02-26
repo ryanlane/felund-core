@@ -102,6 +102,48 @@ export const joinCircle = (state: State, circle: Circle): void => {
   state.currentChannelId = 'general'
 }
 
+export const leaveCircle = (state: State, circleId: string): void => {
+  delete state.circles[circleId]
+  delete state.channels[circleId]
+  // Optionally clean up messages too
+  for (const msgId of Object.keys(state.messages)) {
+    if (state.messages[msgId].circleId === circleId) {
+      delete state.messages[msgId]
+    }
+  }
+  if (state.currentCircleId === circleId) {
+    state.currentCircleId = undefined
+    state.currentChannelId = undefined
+    // Switch to first remaining circle if any
+    const remaining = Object.keys(state.circles)
+    if (remaining.length > 0) {
+      state.currentCircleId = remaining[0]
+      state.currentChannelId = 'general'
+    }
+  }
+}
+
+export const renameCircle = async (state: State, circleId: string, name: string): Promise<ChatMessage> => {
+  const circle = state.circles[circleId]
+  if (!circle) throw new Error('Circle not found')
+  if (!circle.isOwned) throw new Error('Not the owner of this circle')
+
+  const createdTs = nowTs()
+  const msgId = (await sha256Hex(`${state.node.nodeId}|${createdTs}|${randomHex(8)}`)).slice(0, 32)
+  const message: ChatMessage = {
+    msgId,
+    circleId,
+    channelId: CONTROL_CHANNEL_ID,
+    authorNodeId: state.node.nodeId,
+    displayName: state.node.displayName,
+    createdTs,
+    text: JSON.stringify({ t: 'CIRCLE_NAME_EVT', name }),
+  }
+  state.messages[message.msgId] = message
+  circle.name = name
+  return message
+}
+
 export const createChannel = (state: State, circleId: string, channelIdRaw: string): Channel => {
   const channelId = channelIdRaw.trim().toLowerCase().replace(/^#/, '')
   if (!channelId) {

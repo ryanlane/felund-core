@@ -39,7 +39,7 @@ export const isSameDay = (ts1: number, ts2: number): boolean =>
 const PEER_COLORS = [
   '#00c8c0', '#e8c44a', '#c060a0', '#00e0d8',
   '#ffe04a', '#ff70c8', '#e07820', '#ff5080',
-  '#78c830', '#6090e0', '#e07868', '#60b0e0',
+  '#9c9c9c', '#6090e0', '#e07868', '#60b0e0',
 ]
 
 export const peerColor = (nodeId: string): string => {
