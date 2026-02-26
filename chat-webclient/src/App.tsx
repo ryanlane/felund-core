@@ -51,7 +51,7 @@ const peerColor = (nodeId: string): string => {
   return PEER_COLORS[Math.abs(h) % PEER_COLORS.length]
 }
 
-// ── VUMeter ────────────────────────────────────────────────────────────────────
+// ── VUMeter ───────────────────────────────────────────────────────────────
 // Updates a CSS custom property directly on the DOM node (no React re-renders)
 // so the animation runs at full frame-rate without touching the React tree.
 
@@ -134,6 +134,12 @@ function App() {
   const [callPeerStates, setCallPeerStates] = useState<Record<string, CallPeerState>>({})
   const [callLocalStream, setCallLocalStream] = useState<MediaStream | null>(null)
   const callManagerRef = useRef<WebRTCCallManager | null>(null)
+  const remoteAudioRefs = useRef<Map<string, HTMLAudioElement>>(new Map())
+
+  const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([])
+  const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([])
+  const [selectedInputId, setSelectedInputId] = useState('')
+  const [selectedOutputId, setSelectedOutputId] = useState('')
 
   // ── TURN server settings form state ───────────────────────────────────────
   const [turnUrl, setTurnUrl] = useState('')
@@ -151,6 +157,16 @@ function App() {
 
   // Ref for focusing the composer input (used by Escape shortcut)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  const applySinkId = async (el: HTMLAudioElement, deviceId: string) => {
+    const sink = (el as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }).setSinkId
+    if (!sink || !deviceId) return
+    try {
+      await sink.call(el, deviceId)
+    } catch {
+      /* best-effort */
+    }
+  }
 
   // ── Auto-scroll on new messages or channel switch ─────────────────────────
 
@@ -204,6 +220,33 @@ function App() {
       setTurnCredential(loaded.settings.turnCredential ?? '')
     })()
   }, [])
+
+  useEffect(() => {
+    if (!navigator.mediaDevices?.enumerateDevices) return
+
+    const refresh = async () => {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices()
+        const inputs = devices.filter((d) => d.kind === 'audioinput')
+        const outputs = devices.filter((d) => d.kind === 'audiooutput')
+        setAudioInputs(inputs)
+        setAudioOutputs(outputs)
+        if (selectedInputId && !inputs.some((d) => d.deviceId === selectedInputId)) {
+          setSelectedInputId('')
+        }
+        if (selectedOutputId && !outputs.some((d) => d.deviceId === selectedOutputId)) {
+          setSelectedOutputId('')
+        }
+      } catch {
+        /* best-effort */
+      }
+    }
+
+    void refresh()
+    const handler = () => void refresh()
+    navigator.mediaDevices.addEventListener('devicechange', handler)
+    return () => navigator.mediaDevices.removeEventListener('devicechange', handler)
+  }, [selectedInputId, selectedOutputId])
 
   // ── Relay sync: register presence, push/pull messages, peer count ────────────
   // All relay operations run in a single loop so that presence registration
@@ -560,6 +603,31 @@ function App() {
       void mgr.connectToPeer(peerId)
     }
   }, [state]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!selectedOutputId) return
+    for (const el of remoteAudioRefs.current.values()) {
+      void applySinkId(el, selectedOutputId)
+    }
+  }, [selectedOutputId])
+
+  // ── Pause Phase 3 signaling while in a call ─────────────────────────────
+
+  useEffect(() => {
+    const s = stateRef.current
+    if (!s) return
+    const circleId = s.currentCircleId
+    const channelId = s.currentChannelId ?? 'general'
+    const activeCall = circleId
+      ? Object.values(s.activeCalls).find(
+          (c) => c.circleId === circleId && c.channelId === channelId,
+        ) ?? null
+      : null
+    const amInCall = activeCall?.participants.includes(s.node.nodeId) ?? false
+    for (const transport of webrtcRef.current.values()) {
+      transport.setSignalingEnabled(!amInCall)
+    }
+  }, [state])
 
   // ── State persistence helper ──────────────────────────────────────────────
 
@@ -1077,7 +1145,13 @@ function App() {
             autoPlay
             data-testid="call-remote-audio"
             ref={(el) => {
-              if (el) el.srcObject = stream
+              if (!el) {
+                remoteAudioRefs.current.delete(peerId)
+                return
+              }
+              el.srcObject = stream
+              remoteAudioRefs.current.set(peerId, el)
+              if (selectedOutputId) void applySinkId(el, selectedOutputId)
             }}
           />
         ))}
@@ -1338,6 +1412,49 @@ function App() {
                         0,
                       )}
                     </div>
+                  </div>
+                  <div style={{ marginBottom: '0.6rem' }}>
+                    <label style={{ display: 'block', marginBottom: '0.35rem' }}>
+                      Microphone
+                      <select
+                        value={selectedInputId}
+                        onChange={(e) => {
+                          const nextId = e.target.value
+                          setSelectedInputId(nextId)
+                          void (async () => {
+                            const mgr = callManagerRef.current
+                            if (!mgr) return
+                            const ok = await mgr.setAudioInput(nextId || null)
+                            if (!ok) {
+                              setStatus('Microphone switch failed — check permissions or device.')
+                            } else if (callManagerRef.current === mgr) {
+                              setCallLocalStream(mgr.localStream)
+                            }
+                          })()
+                        }}
+                      >
+                        <option value="">Default</option>
+                        {audioInputs.map((d) => (
+                          <option key={d.deviceId} value={d.deviceId}>
+                            {d.label || `Microphone ${d.deviceId.slice(0, 6)}`}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label style={{ display: 'block' }}>
+                      Speaker
+                      <select
+                        value={selectedOutputId}
+                        onChange={(e) => setSelectedOutputId(e.target.value)}
+                      >
+                        <option value="">Default</option>
+                        {audioOutputs.map((d) => (
+                          <option key={d.deviceId} value={d.deviceId}>
+                            {d.label || `Speaker ${d.deviceId.slice(0, 6)}`}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                   </div>
                   {/* Video grid — shown when camera is on */}
                   {isVideoOn && (

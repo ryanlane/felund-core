@@ -21,54 +21,11 @@
  * peer is unavailable but the call control plane (text) is unaffected.
  */
 
-import { sha256Hex } from '../core/crypto'
+import { SignalingClient } from './signaling'
+import type { CallManagerConfig, CallPeerSession, CallPeerState, SignalData } from './types'
+import { ICE_TIMEOUT_MS } from './types'
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-export type CallPeerState = 'connecting' | 'connected' | 'failed'
-
-interface CallPeerSession {
-  sessionId: string
-  peerId: string
-  isInitiator: boolean
-  pc: RTCPeerConnection
-  state: CallPeerState
-  remoteStream: MediaStream
-  iceTimer: ReturnType<typeof setTimeout> | null
-  /**
-   * True while a local offer is outstanding (initial or renegotiation).
-   * Cleared by the media-answer handler so that the flag covers the full
-   * round-trip, not just the createOffer() call.
-   */
-  negotiating: boolean
-}
-
-export interface CallManagerConfig {
-  nodeId: string
-  callSessionId: string
-  circleId: string
-  rendezvousBase: string
-  iceServers: RTCIceServer[]
-  onRemoteStream: (peerId: string, stream: MediaStream) => void
-  onRemoteStreamEnd: (peerId: string) => void
-  onPeerStateChange: (peerId: string, state: CallPeerState) => void
-}
-
-interface SignalData {
-  id: number
-  session_id: string
-  from_node: string
-  to_node: string
-  type: string
-  payload: string
-}
-
-const ICE_TIMEOUT_MS = 20_000
-const SIGNAL_POLL_MS = 2_000
-const SIGNAL_BACKOFF_BASE_MS = 500
-const SIGNAL_BACKOFF_MAX_MS = 5_000
-const CANDIDATE_FLUSH_MS = 250
-const CANDIDATE_BATCH = 6
+export type { CallPeerState, CallManagerConfig } from './types'
 
 // ── WebRTCCallManager ─────────────────────────────────────────────────────────
 
@@ -78,28 +35,24 @@ export class WebRTCCallManager {
 
   private sessions = new Map<string, CallPeerSession>()
   private config: CallManagerConfig
-  private pollTimer: ReturnType<typeof setInterval> | null = null
-  private lastSignalId = 0
   private stopped = false
-  /** True while a pollSignals() call is in flight — prevents overlapping polls. */
-  private pollInFlight = false
   /** Resolves when startMedia() has finished (success or failure). */
   private mediaReady: Promise<void> = Promise.resolve()
-  /** Cached circle_hint (16-hex SHA-256 prefix of circleId). */
-  private circleHint: string | null = null
-  private signalBackoffUntil = 0
-  private signalBackoffMs = 0
-  private candidateQueue: Array<{ sessionId: string; peerId: string; payload: string }> = []
-  private candidateFlushTimer: ReturnType<typeof setTimeout> | null = null
   /**
    * Candidates that arrived before the session existed or before
    * setRemoteDescription() was called.  Flushed after setRemoteDescription().
    */
   private pendingCandidates = new Map<string, RTCIceCandidateInit[]>()
+  private signaling: SignalingClient
 
   constructor(config: CallManagerConfig) {
     this.config = config
-    this.pollTimer = setInterval(() => void this.pollSignals(), SIGNAL_POLL_MS)
+    this.signaling = new SignalingClient({
+      nodeId: config.nodeId,
+      circleId: config.circleId,
+      rendezvousBase: config.rendezvousBase,
+      onSignal: (sig) => this.handleSignal(sig),
+    })
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
@@ -128,6 +81,11 @@ export class WebRTCCallManager {
       }
     })()
     await this.mediaReady
+    for (const track of this.localStream?.getAudioTracks() ?? []) {
+      track.onended = () => {
+        console.warn('[call] local audio track ended')
+      }
+    }
     return (this.localStream?.getAudioTracks().length ?? 0) > 0
   }
 
@@ -147,6 +105,12 @@ export class WebRTCCallManager {
     // Wait for getUserMedia to complete so tracks are available for the offer.
     await this.mediaReady
     if (this.stopped || this.sessions.has(sessionId)) return
+
+    const hasAudio = await this.ensureAudioTrack()
+    if (!hasAudio) {
+      console.warn('[call] no local audio track; skipping media offer')
+      return
+    }
 
     const session = this.createPeerSession(sessionId, peerId, true)
     this.sessions.set(sessionId, session)
@@ -169,7 +133,7 @@ export class WebRTCCallManager {
     try {
       const offer = await session.pc.createOffer()
       await session.pc.setLocalDescription(offer)
-      await this.postSignal(sessionId, peerId, 'media-offer', JSON.stringify(offer))
+      await this.signaling.postSignal(sessionId, peerId, 'media-offer', JSON.stringify(offer))
     } catch (err) {
       console.warn('[call] offer failed:', err)
       this.closeSession(session, 'failed')
@@ -236,17 +200,49 @@ export class WebRTCCallManager {
     }
   }
 
+  async setAudioInput(deviceId: string | null): Promise<boolean> {
+    try {
+      const constraints: MediaStreamConstraints = {
+        audio: deviceId ? { deviceId: { exact: deviceId } } : true,
+      }
+      const stream = await navigator.mediaDevices.getUserMedia(constraints)
+      const newTrack = stream.getAudioTracks()[0]
+      if (!newTrack) return false
+      newTrack.onended = () => {
+        console.warn('[call] local audio track ended')
+      }
+
+      if (this.localStream) {
+        for (const oldTrack of this.localStream.getAudioTracks()) {
+          this.localStream.removeTrack(oldTrack)
+          oldTrack.stop()
+        }
+        this.localStream.addTrack(newTrack)
+      } else {
+        this.localStream = new MediaStream([newTrack])
+      }
+
+      for (const session of this.sessions.values()) {
+        if (session.state === 'failed') continue
+        const sender = session.pc.getSenders().find((s) => s.track?.kind === 'audio')
+        if (sender) {
+          await sender.replaceTrack(newTrack)
+        } else {
+          session.pc.addTrack(newTrack, this.localStream)
+        }
+      }
+
+      return true
+    } catch (err) {
+      console.warn('[call] getUserMedia (audio switch) failed:', err)
+      return false
+    }
+  }
+
   /** Stop all media tracks, close all PeerConnections, stop signaling poll. */
   destroy(): void {
     this.stopped = true
-    if (this.pollTimer !== null) {
-      clearInterval(this.pollTimer)
-      this.pollTimer = null
-    }
-    if (this.candidateFlushTimer !== null) {
-      clearTimeout(this.candidateFlushTimer)
-      this.candidateFlushTimer = null
-    }
+    this.signaling.stop()
     for (const session of this.sessions.values()) {
       this.cleanupSession(session)
     }
@@ -255,6 +251,41 @@ export class WebRTCCallManager {
     if (this.localStream) {
       for (const track of this.localStream.getTracks()) track.stop()
       this.localStream = null
+    }
+  }
+
+  // ── Private: media ─────────────────────────────────────────────────────────
+
+  private hasLiveAudio(): boolean {
+    return (
+      this.localStream?.getAudioTracks().some((track) => track.readyState === 'live') ??
+      false
+    )
+  }
+
+  private async ensureAudioTrack(): Promise<boolean> {
+    if (this.hasLiveAudio()) return true
+    try {
+      const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const audioTrack = audioStream.getAudioTracks()[0]
+      if (!audioTrack) return false
+      audioTrack.onended = () => {
+        console.warn('[call] local audio track ended')
+      }
+      if (this.localStream) {
+        this.localStream.addTrack(audioTrack)
+      } else {
+        this.localStream = audioStream
+      }
+      for (const session of this.sessions.values()) {
+        if (session.state !== 'failed') {
+          session.pc.addTrack(audioTrack, this.localStream)
+        }
+      }
+      return true
+    } catch (err) {
+      console.warn('[call] getUserMedia (audio refresh) failed:', err)
+      return false
     }
   }
 
@@ -282,12 +313,7 @@ export class WebRTCCallManager {
 
     pc.onicecandidate = (event) => {
       if (this.stopped || !event.candidate) return
-      this.candidateQueue.push({
-        sessionId,
-        peerId,
-        payload: JSON.stringify(event.candidate),
-      })
-      this.scheduleCandidateFlush()
+      this.signaling.queueCandidate(sessionId, peerId, JSON.stringify(event.candidate))
     }
 
     pc.onconnectionstatechange = () => {
@@ -308,10 +334,11 @@ export class WebRTCCallManager {
       this.config.onRemoteStream(peerId, remoteStream)
     }
 
-    // Renegotiation (e.g., video track added after initial offer).
-    // Only the initiator ever sends re-offers; the answerer responds.
+    // Perfect negotiation: either side may initiate renegotiation (e.g., when
+    // the answerer enables their camera).  Glare is resolved in handleSignal
+    // using nodeId as the polite/impolite tie-breaker.
     pc.onnegotiationneeded = () => {
-      if (!isInitiator || session.negotiating || this.stopped) return
+      if (session.negotiating || this.stopped) return
       void this.renegotiate(session)
     }
 
@@ -332,13 +359,27 @@ export class WebRTCCallManager {
     try {
       const offer = await session.pc.createOffer()
       await session.pc.setLocalDescription(offer)
-      await this.postSignal(session.sessionId, session.peerId, 'media-offer', JSON.stringify(offer))
-      // negotiating stays true until the media-answer arrives and clears it,
-      // preventing a second onnegotiationneeded from starting a concurrent offer.
+      const sent = await this.signaling.postSignal(
+        session.sessionId,
+        session.peerId,
+        'media-offer',
+        JSON.stringify(offer),
+      )
+      if (sent) {
+        // Keep negotiating=true until the media-answer arrives and clears it,
+        // preventing a second onnegotiationneeded from starting a concurrent offer.
+        return
+      }
+      // postSignal returns false without throwing when the send fails (it
+      // catches internally).  The SignalingClient will retry in the background,
+      // but if all retries are eventually exhausted, no answer will ever arrive
+      // and negotiating would be permanently stuck.  Reset now so that
+      // onnegotiationneeded can fire again once the connection recovers.
+      console.warn('[call] renegotiation offer send failed; resetting negotiating flag')
     } catch (err) {
       console.warn('[call] renegotiation offer failed:', err)
-      session.negotiating = false // clear on error so future renegotiations can fire
     }
+    session.negotiating = false
   }
 
   private updateState(session: CallPeerSession, state: CallPeerState): void {
@@ -381,33 +422,7 @@ export class WebRTCCallManager {
     }
   }
 
-  // ── Private: signaling ─────────────────────────────────────────────────────
-
-  private async pollSignals(): Promise<void> {
-    if (this.stopped || this.pollInFlight) return
-    this.pollInFlight = true
-    try {
-      const query = new URLSearchParams({
-        to_node_id: this.config.nodeId,
-        since_id: String(this.lastSignalId),
-      })
-      const resp = await fetch(`${this.config.rendezvousBase}/v1/signal?${query}`)
-      if (!resp.ok) return
-      const data = (await resp.json()) as { ok: boolean; signals?: SignalData[] }
-      for (const sig of data.signals ?? []) {
-        // Advance past ALL signals (including Phase-3 offer/answer/candidate)
-        // so Phase-3 churn can't push Phase-5 signals beyond the relay's
-        // LIMIT 50 page and make them invisible forever.
-        this.lastSignalId = Math.max(this.lastSignalId, sig.id)
-        if (!sig.type.startsWith('media-')) continue
-        await this.handleSignal(sig)
-      }
-    } catch {
-      /* network error — retry next poll */
-    } finally {
-      this.pollInFlight = false
-    }
-  }
+  // ── Private: signal handling ───────────────────────────────────────────────
 
   private async handleSignal(sig: SignalData): Promise<void> {
     const { session_id, from_node, type, payload } = sig
@@ -422,10 +437,17 @@ export class WebRTCCallManager {
       if (!existingSession) {
         // First offer: create the answerer session.
         await this.mediaReady
+        await this.ensureAudioTrack()
         if (this.sessions.has(session_id)) return // created while awaiting mediaReady
         const session = this.createPeerSession(session_id, from_node, false)
         this.sessions.set(session_id, session)
 
+        // Guard: addTrack() queues an onnegotiationneeded macrotask.  Hold
+        // negotiating=true so that macrotask cannot start a spurious re-offer
+        // while the initial answer exchange is still in flight.  Cleared
+        // below once the answer is sent, opening the door for future
+        // renegotiations by either side.
+        session.negotiating = true
         if (this.localStream) {
           for (const track of this.localStream.getTracks()) {
             session.pc.addTrack(track, this.localStream)
@@ -436,23 +458,41 @@ export class WebRTCCallManager {
           await session.pc.setRemoteDescription(JSON.parse(payload) as RTCSessionDescriptionInit)
           const answer = await session.pc.createAnswer()
           await session.pc.setLocalDescription(answer)
-          await this.postSignal(session_id, from_node, 'media-answer', JSON.stringify(answer))
+          await this.signaling.postSignal(session_id, from_node, 'media-answer', JSON.stringify(answer))
+          session.negotiating = false
           await this.flushPendingCandidates(session)
         } catch (err) {
           console.warn('[call] answer failed:', err)
           this.closeSession(session, 'failed')
         }
       } else {
-        // Re-offer: renegotiation from the initiator (e.g., they added video).
-        // Skip if a local negotiation is already in flight to avoid SDP glare.
-        if (existingSession.negotiating) return
+        // Re-offer: renegotiation from either side (perfect negotiation).
+        //
+        // Glare occurs when both sides simultaneously call createOffer().
+        // Tie-break by nodeId: the initiator (smaller nodeId) is "impolite"
+        // and ignores the incoming offer; the answerer (larger nodeId) is
+        // "polite" and rolls back its pending offer to accept the remote one.
+        // After rollback, onnegotiationneeded will re-fire so the polite side
+        // can still send its own tracks in a fresh offer.
+        const isPolite = !existingSession.isInitiator
+        const offerCollision =
+          existingSession.negotiating ||
+          existingSession.pc.signalingState !== 'stable'
+
+        if (offerCollision && !isPolite) return // impolite: ignore glare
+
         try {
+          if (offerCollision) {
+            // Polite side: roll back our pending offer before accepting theirs.
+            await existingSession.pc.setLocalDescription({ type: 'rollback' })
+            existingSession.negotiating = false
+          }
           await existingSession.pc.setRemoteDescription(
             JSON.parse(payload) as RTCSessionDescriptionInit,
           )
           const answer = await existingSession.pc.createAnswer()
           await existingSession.pc.setLocalDescription(answer)
-          await this.postSignal(session_id, from_node, 'media-answer', JSON.stringify(answer))
+          await this.signaling.postSignal(session_id, from_node, 'media-answer', JSON.stringify(answer))
           await this.flushPendingCandidates(existingSession)
         } catch (err) {
           console.warn('[call] re-answer failed:', err)
@@ -463,10 +503,13 @@ export class WebRTCCallManager {
       if (!session) return
       try {
         await session.pc.setRemoteDescription(JSON.parse(payload) as RTCSessionDescriptionInit)
-        session.negotiating = false
         await this.flushPendingCandidates(session)
       } catch (err) {
         console.warn('[call] setRemoteDescription (answer) failed:', err)
+      } finally {
+        // Always clear the flag — even if setRemoteDescription threw — so that
+        // onnegotiationneeded can fire again and retry the renegotiation.
+        session.negotiating = false
       }
     } else if (type === 'media-candidate') {
       const candidate = JSON.parse(payload) as RTCIceCandidateInit
@@ -483,74 +526,6 @@ export class WebRTCCallManager {
       } catch {
         /* stale / duplicate candidate — ignore */
       }
-    }
-  }
-
-  private async postSignal(
-    sessionId: string,
-    toNode: string,
-    type: string,
-    payload: string,
-  ): Promise<void> {
-    if (this.stopped) return
-    if (type === 'media-candidate' && Date.now() < this.signalBackoffUntil) return
-    try {
-      if (!this.circleHint) {
-        this.circleHint = (await sha256Hex(this.config.circleId)).slice(0, 16)
-      }
-      const resp = await fetch(`${this.config.rendezvousBase}/v1/signal`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          session_id: sessionId,
-          from_node_id: this.config.nodeId,
-          to_node_id: toNode,
-          circle_hint: this.circleHint,
-          type,
-          payload,
-          ttl_s: type === 'media-candidate' ? 60 : 120,
-        }),
-      })
-      if (!resp.ok) {
-        if (resp.status === 429) {
-          this.signalBackoffMs = this.signalBackoffMs
-            ? Math.min(this.signalBackoffMs * 2, SIGNAL_BACKOFF_MAX_MS)
-            : SIGNAL_BACKOFF_BASE_MS
-          this.signalBackoffUntil = Date.now() + this.signalBackoffMs
-        }
-        const body = await resp.text()
-        console.warn('[call] postSignal failed', resp.status, type, body.slice(0, 80))
-        return
-      }
-      this.signalBackoffMs = 0
-      this.signalBackoffUntil = 0
-    } catch (err) {
-      console.warn('[call] postSignal error:', err)
-    }
-  }
-
-  private scheduleCandidateFlush(): void {
-    if (this.candidateFlushTimer !== null) return
-    this.candidateFlushTimer = setTimeout(() => {
-      this.candidateFlushTimer = null
-      void this.flushCandidateQueue()
-    }, CANDIDATE_FLUSH_MS)
-  }
-
-  private async flushCandidateQueue(): Promise<void> {
-    if (this.stopped || this.candidateQueue.length === 0) return
-    if (Date.now() < this.signalBackoffUntil) {
-      this.scheduleCandidateFlush()
-      return
-    }
-
-    const batch = this.candidateQueue.splice(0, CANDIDATE_BATCH)
-    for (const item of batch) {
-      await this.postSignal(item.sessionId, item.peerId, 'media-candidate', item.payload)
-    }
-
-    if (this.candidateQueue.length > 0) {
-      this.scheduleCandidateFlush()
     }
   }
 }

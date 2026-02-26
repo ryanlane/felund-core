@@ -188,6 +188,7 @@ export class WebRTCTransport {
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private stopped = false
   private cachedHint = ''
+  private signalingEnabled = true
   private signalBackoffUntil = 0
   private signalBackoffMs = 0
   private candidateQueue: Array<{ sessionId: string; peerId: string; payload: string }> = []
@@ -198,7 +199,17 @@ export class WebRTCTransport {
     void circleHintFor(config.circleId).then((h) => {
       this.cachedHint = h
     })
-    this.pollTimer = setInterval(() => void this.pollSignals(), SIGNAL_POLL_MS)
+    this.startPolling()
+  }
+
+  setSignalingEnabled(enabled: boolean): void {
+    if (this.signalingEnabled === enabled) return
+    this.signalingEnabled = enabled
+    if (enabled) {
+      this.startPolling()
+    } else {
+      this.stopPolling()
+    }
   }
 
   /** Number of currently open DataChannel connections. */
@@ -214,6 +225,7 @@ export class WebRTCTransport {
    */
   async connectToPeer(peerId: string): Promise<void> {
     if (this.stopped) return
+    if (!this.signalingEnabled) return
     if (this.config.nodeId >= peerId) return // Other side will initiate
 
     const sessionId = makeSessionId(this.config.nodeId, peerId)
@@ -247,10 +259,7 @@ export class WebRTCTransport {
   /** Tear down all connections and stop polling. */
   destroy(): void {
     this.stopped = true
-    if (this.pollTimer !== null) {
-      clearInterval(this.pollTimer)
-      this.pollTimer = null
-    }
+    this.stopPolling()
     for (const session of this.sessions.values()) {
       if (session.iceTimer !== null) clearTimeout(session.iceTimer)
       try {
@@ -507,7 +516,7 @@ export class WebRTCTransport {
   // ── Private: signaling ──────────────────────────────────────────────────────
 
   private async pollSignals(): Promise<void> {
-    if (this.stopped) return
+    if (this.stopped || !this.signalingEnabled) return
     try {
       const query = new URLSearchParams({
         to_node_id: this.config.nodeId,
@@ -575,7 +584,7 @@ export class WebRTCTransport {
     type: string,
     payload: string,
   ): Promise<void> {
-    if (this.stopped) return
+    if (this.stopped || !this.signalingEnabled) return
     if (type === 'candidate' && Date.now() < this.signalBackoffUntil) return
     const hint = this.cachedHint || (await circleHintFor(this.config.circleId))
     try {
@@ -617,7 +626,7 @@ export class WebRTCTransport {
   }
 
   private async flushCandidateQueue(): Promise<void> {
-    if (this.stopped || this.candidateQueue.length === 0) return
+    if (this.stopped || !this.signalingEnabled || this.candidateQueue.length === 0) return
     if (Date.now() < this.signalBackoffUntil) {
       this.scheduleCandidateFlush()
       return
@@ -631,5 +640,16 @@ export class WebRTCTransport {
     if (this.candidateQueue.length > 0) {
       this.scheduleCandidateFlush()
     }
+  }
+
+  private startPolling(): void {
+    if (this.pollTimer !== null) return
+    this.pollTimer = setInterval(() => void this.pollSignals(), SIGNAL_POLL_MS)
+  }
+
+  private stopPolling(): void {
+    if (this.pollTimer === null) return
+    clearInterval(this.pollTimer)
+    this.pollTimer = null
   }
 }
