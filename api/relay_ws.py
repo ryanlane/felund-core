@@ -32,21 +32,28 @@ import aiohttp
 import aiosqlite
 from aiohttp import web
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 MAX_ENDPOINTS = 16
 MAX_LIMIT = 200
 PING_INTERVAL_S = 15
 WS_BUFFER_S = 120  # seconds of messages to send to new WS subscribers on connect
 
-# Signal TTLs
+# Signal TTLs / limits
 SIGNAL_TTL_CANDIDATE_S = 60
 SIGNAL_TTL_OFFER_ANSWER_S = 120
 SIGNAL_RATE_LIMIT = int(os.environ.get("FELUND_SIGNAL_RATE_LIMIT", "20"))
 SIGNAL_RATE_WINDOW_S = float(os.environ.get("FELUND_SIGNAL_RATE_WINDOW_S", "10.0"))
+SIGNAL_POLL_LIMIT = 200  # max rows returned per GET /v1/signal
+
+CLEANUP_INTERVAL_S = 60  # how often the background cleanup task runs
 
 # ── In-memory rooms: circle_hint → set of live WebSocket connections ──────────
 
 _rooms: Dict[str, Set[web.WebSocketResponse]] = defaultdict(set)
+
+# ── WebSocket → node_id reverse map (used to suppress self-echo on broadcast) ─
+
+_ws_nodes: Dict[web.WebSocketResponse, str] = {}
 
 # ── In-memory rate limiter for signaling ──────────────────────────────────────
 # node_id → (request_count, window_start)
@@ -210,7 +217,6 @@ async def route_register(request: web.Request) -> web.Response:
            VALUES (?, ?, ?, ?, ?, ?)""",
         (circle_hint, node_id, endpoints, capabilities, now, expires_at),
     )
-    await db.execute("DELETE FROM presence WHERE expires_at <= ?", (now,))
     await db.commit()
 
     remote_ip = (
@@ -342,14 +348,17 @@ async def route_messages_post(request: web.Request) -> web.Response:
             stored += 1
             valid.append(msg)
 
-    await db.execute("DELETE FROM relay_messages WHERE expires_at <= ?", (now,))
     await db.commit()
 
-    # Broadcast to all live WS subscribers in this room.
+    # Broadcast to live WS subscribers, skipping the sender's own connection
+    # (identified by X-Felund-Node) to avoid redundant self-echo.
     if valid and circle_hint in _rooms:
+        sender_node = request.headers.get("X-Felund-Node", "")
         frame = json.dumps({"t": "MESSAGES", "messages": valid, "server_time": now})
         dead: Set[web.WebSocketResponse] = set()
         for ws in list(_rooms[circle_hint]):
+            if sender_node and _ws_nodes.get(ws) == sender_node:
+                continue
             try:
                 await ws.send_str(frame)
             except Exception:
@@ -428,7 +437,11 @@ async def route_signal_post(request: web.Request) -> web.Response:
 
     if not _check_signal_rate(from_node):
         _log(f"signal POST 429 from={from_node[:8]} session={session_id[:16]} type={sig_type}")
-        return _err("Rate limit exceeded — slow down", status=429)
+        resp = _err(
+            f"Rate limit exceeded — retry after {int(SIGNAL_RATE_WINDOW_S)}s", status=429
+        )
+        resp.headers["Retry-After"] = str(int(SIGNAL_RATE_WINDOW_S))
+        return resp
 
     ttl_raw = data.get("ttl_s", None)
     if sig_type in ("candidate", "media-candidate"):
@@ -450,7 +463,6 @@ async def route_signal_post(request: web.Request) -> web.Response:
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
         (session_id, from_node, to_node, sig_type, payload, now, expires_at),
     )
-    await db.execute("DELETE FROM signal_messages WHERE expires_at <= ?", (now,))
     await db.commit()
 
     _log(
@@ -479,8 +491,8 @@ async def route_signal_get(request: web.Request) -> web.Response:
             "SELECT id, session_id, from_node, to_node, type, payload, created_at"
             " FROM signal_messages"
             " WHERE to_node = ? AND session_id = ? AND id > ? AND expires_at > ?"
-            " ORDER BY id ASC LIMIT 50",
-            (to_node, session_id, since_id, now),
+            " ORDER BY id ASC LIMIT ?",
+            (to_node, session_id, since_id, now, SIGNAL_POLL_LIMIT),
         ) as cur:
             rows = await cur.fetchall()
     else:
@@ -488,8 +500,8 @@ async def route_signal_get(request: web.Request) -> web.Response:
             "SELECT id, session_id, from_node, to_node, type, payload, created_at"
             " FROM signal_messages"
             " WHERE to_node = ? AND id > ? AND expires_at > ?"
-            " ORDER BY id ASC LIMIT 50",
-            (to_node, since_id, now),
+            " ORDER BY id ASC LIMIT ?",
+            (to_node, since_id, now, SIGNAL_POLL_LIMIT),
         ) as cur:
             rows = await cur.fetchall()
 
@@ -524,6 +536,7 @@ async def route_ws(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
 
     _rooms[circle_hint].add(ws)
+    _ws_nodes[ws] = node_id
     _log(f"ws connect circle={circle_hint[:8]} node={node_id[:8]}")
 
     # Immediately send buffered messages from the last WS_BUFFER_S seconds
@@ -560,9 +573,44 @@ async def route_ws(request: web.Request) -> web.WebSocketResponse:
             # PONG and any other client frames are silently accepted.
     finally:
         _rooms[circle_hint].discard(ws)
+        if not _rooms[circle_hint]:
+            del _rooms[circle_hint]
+        _ws_nodes.pop(ws, None)
         _log(f"ws disconnect circle={circle_hint[:8]} node={node_id[:8]}")
 
     return ws
+
+
+# ── Background cleanup task ───────────────────────────────────────────────────
+
+async def _cleanup_task(app: web.Application) -> None:
+    """Prune expired DB rows and stale rate-limit buckets every CLEANUP_INTERVAL_S.
+
+    Removing these from the hot-path write handlers avoids redundant DELETE
+    queries on every registration, message post, and signal post.
+    """
+    while True:
+        await asyncio.sleep(CLEANUP_INTERVAL_S)
+        try:
+            now = int(time.time())
+            db: aiosqlite.Connection = app["db"]
+            await db.execute("DELETE FROM presence WHERE expires_at <= ?", (now,))
+            await db.execute("DELETE FROM relay_messages WHERE expires_at <= ?", (now,))
+            await db.execute("DELETE FROM signal_messages WHERE expires_at <= ?", (now,))
+            await db.commit()
+
+            # Prune rate-limit buckets whose window has long since expired so
+            # _signal_rate doesn't grow without bound over the server lifetime.
+            cutoff = now - SIGNAL_RATE_WINDOW_S * 2
+            stale = [nid for nid, (_, start) in _signal_rate.items() if start < cutoff]
+            for nid in stale:
+                del _signal_rate[nid]
+            if stale:
+                _log(f"cleanup: pruned {len(stale)} rate-limit bucket(s)")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log(f"cleanup task error: {exc}")
 
 
 # ── App factory ───────────────────────────────────────────────────────────────
@@ -577,6 +625,9 @@ def make_app(db_path: str) -> web.Application:
         db.row_factory = aiosqlite.Row  # type: ignore[assignment]
         await _init_db(db)
         app["db"] = db
+        task = asyncio.create_task(_cleanup_task(app))
+        app["tasks"].add(task)
+        task.add_done_callback(app["tasks"].discard)
 
     async def on_cleanup(app: web.Application) -> None:
         for circle_ws in list(_rooms.values()):
