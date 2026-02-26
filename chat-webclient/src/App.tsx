@@ -30,80 +30,12 @@ import type { WsStatus } from './network/relay'
 import { WebRTCTransport } from './network/transport'
 import { WebRTCCallManager } from './network/call'
 import type { CallPeerState } from './network/call'
-
-const formatTime = (ts: number): string => {
-  const d = new Date(ts * 1000)
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-}
-
-// Deterministic per-peer color palette — mirrors the Python TUI _peer_color palette.
-const PEER_COLORS = [
-  '#00c8c0', '#e8c44a', '#c060a0', '#00e0d8',
-  '#ffe04a', '#ff70c8', '#e07820', '#ff5080',
-  '#78c830', '#6090e0', '#e07868', '#60b0e0',
-]
-
-const peerColor = (nodeId: string): string => {
-  let h = 5381
-  for (let i = 0; i < nodeId.length; i++) {
-    h = ((h << 5) + h + nodeId.charCodeAt(i)) | 0
-  }
-  return PEER_COLORS[Math.abs(h) % PEER_COLORS.length]
-}
-
-// ── VUMeter ───────────────────────────────────────────────────────────────
-// Updates a CSS custom property directly on the DOM node (no React re-renders)
-// so the animation runs at full frame-rate without touching the React tree.
-
-function VUMeter({ stream }: { stream: MediaStream | null }) {
-  const barRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const bar = barRef.current
-    if (!bar) return
-
-    if (!stream || stream.getAudioTracks().filter((t) => t.readyState === 'live').length === 0) {
-      bar.style.setProperty('--vu', '0')
-      return
-    }
-
-    let ctx: AudioContext | null = null
-    let rafId = 0
-
-    try {
-      ctx = new AudioContext()
-      void ctx.resume()
-      const analyser = ctx.createAnalyser()
-      analyser.fftSize = 512
-      analyser.smoothingTimeConstant = 0.6
-      ctx.createMediaStreamSource(stream).connect(analyser)
-      const data = new Uint8Array(analyser.frequencyBinCount)
-
-      const tick = () => {
-        analyser.getByteTimeDomainData(data)
-        let sum = 0
-        for (const v of data) {
-          const n = (v - 128) / 128
-          sum += n * n
-        }
-        const rms = Math.sqrt(sum / data.length)
-        bar.style.setProperty('--vu', String(Math.min(1, rms * 6)))
-        rafId = requestAnimationFrame(tick)
-      }
-      rafId = requestAnimationFrame(tick)
-    } catch {
-      // AudioContext unavailable (e.g. sandboxed iframe)
-    }
-
-    return () => {
-      cancelAnimationFrame(rafId)
-      ctx?.close().catch(() => {})
-      bar.style.setProperty('--vu', '0')
-    }
-  }, [stream])
-
-  return <div className="tui-vu-bar" ref={barRef} />
-}
+import { formatTime, peerColor } from './utils/peerColor'
+import { SetupScreen } from './components/SetupScreen'
+import { SettingsModal } from './components/SettingsModal'
+import { HelpModal } from './components/HelpModal'
+import { InviteModal } from './components/InviteModal'
+import { CallModal } from './components/CallModal'
 
 function App() {
   const [state, setState] = useState<State | null>(null)
@@ -922,87 +854,20 @@ function App() {
 
   if (!hasCircles) {
     return (
-      <div className="tui-app">
-        <div className="tui-header">
-          <span className="tui-title">felundchat</span>
-          <span className="tui-header-dim"> — setup</span>
-        </div>
-        <div className="tui-setup-overlay">
-          <form className="tui-setup-form" onSubmit={handleSetup}>
-            <div className="tui-modal-header">Setup</div>
-            <div className="tui-modal-body">
-              <label>
-                Display name
-                <input
-                  value={displayName}
-                  onChange={(e) => setDisplayName(e.target.value)}
-                  placeholder="anon"
-                  autoFocus
-                  data-testid="setup-display-name"
-                />
-              </label>
-              <div className="tui-tab-row">
-                <button
-                  type="button"
-                  className={`tui-tab ${mode === 'host' ? 'active' : ''}`}
-                  onClick={() => setMode('host')}
-                  data-testid="setup-tab-host"
-                >
-                  Host
-                </button>
-                <button
-                  type="button"
-                  className={`tui-tab ${mode === 'join' ? 'active' : ''}`}
-                  onClick={() => setMode('join')}
-                  data-testid="setup-tab-join"
-                >
-                  Join
-                </button>
-              </div>
-              {mode === 'host' ? (
-                <label>
-                  Circle name (optional)
-                  <input
-                    value={circleName}
-                    onChange={(e) => setCircleName(e.target.value)}
-                    placeholder="my-group"
-                    data-testid="setup-circle-name"
-                  />
-                </label>
-              ) : (
-                <label>
-                  Invite code
-                  <textarea
-                    value={inviteInput}
-                    onChange={(e) => setInviteInput(e.target.value)}
-                    rows={4}
-                    placeholder="Paste invite code here…"
-                    data-testid="setup-invite-code"
-                  />
-                </label>
-              )}
-              <label>
-                Rendezvous server
-                <input
-                  value={rendezvousInput}
-                  onChange={(e) => setRendezvousInput(e.target.value)}
-                  placeholder="https://your-relay-server/api"
-                  data-testid="setup-rendezvous"
-                />
-              </label>
-              {status && <p className="tui-error">{status}</p>}
-            </div>
-            <div className="tui-modal-actions">
-              <button type="submit" className="tui-btn primary" data-testid="setup-submit">
-                {mode === 'host' ? 'Create circle' : 'Join circle'}
-              </button>
-            </div>
-          </form>
-        </div>
-        <div className="tui-footer">
-          <span>Enter to submit · Tab to switch fields</span>
-        </div>
-      </div>
+      <SetupScreen
+        displayName={displayName}
+        setDisplayName={setDisplayName}
+        mode={mode}
+        setMode={setMode}
+        circleName={circleName}
+        setCircleName={setCircleName}
+        inviteInput={inviteInput}
+        setInviteInput={setInviteInput}
+        rendezvousInput={rendezvousInput}
+        setRendezvousInput={setRendezvousInput}
+        status={status}
+        onSubmit={(e) => void handleSetup(e)}
+      />
     )
   }
 
@@ -1166,7 +1031,7 @@ function App() {
       {/* Input bar */}
       <div className="tui-input-row">
         <span className="tui-prompt">&gt;</span>
-        <form className="tui-input-form" onSubmit={handleSend}>
+        <form className="tui-input-form" onSubmit={(e) => void handleSend(e)}>
           <input
             ref={inputRef}
             value={composer}
@@ -1197,441 +1062,62 @@ function App() {
         <span className="tui-footer-node">node: {state.node.nodeId.slice(0, 8)}</span>
       </div>
 
-      {/* Settings Modal */}
-      {showSettings && (
-        <div className="tui-modal-overlay" onClick={() => setShowSettings(false)}>
-          <div className="tui-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="tui-modal-header">Settings</div>
-            <div className="tui-modal-body">
-              <label>
-                Display name
-                <input
-                  value={displayName}
-                  onChange={(e) => setDisplayName(e.target.value)}
-                  autoFocus
-                />
-              </label>
-              <label>
-                Rendezvous server
-                <input
-                  value={rendezvousInput}
-                  onChange={(e) => setRendezvousInput(e.target.value)}
-                  placeholder="https://your-relay-server/api"
-                />
-              </label>
-              <label>
-                TURN server <span className="tui-dim">(optional, for calls behind strict NAT)</span>
-                <input
-                  value={turnUrl}
-                  onChange={(e) => setTurnUrl(e.target.value)}
-                  placeholder="turn:your-turn-server:3478"
-                />
-              </label>
-              <label>
-                TURN username
-                <input
-                  value={turnUsername}
-                  onChange={(e) => setTurnUsername(e.target.value)}
-                />
-              </label>
-              <label>
-                TURN credential
-                <input
-                  type="password"
-                  value={turnCredential}
-                  onChange={(e) => setTurnCredential(e.target.value)}
-                />
-              </label>
-              <p className="tui-dim" style={{ margin: 0, fontSize: '0.78rem' }}>
-                node: {state.node.nodeId}
-              </p>
-            </div>
-            <div className="tui-modal-actions">
-              <button className="tui-btn" onClick={() => void testRendezvousHealth()}>
-                Test relay
-              </button>
-              <button className="tui-btn" onClick={() => setShowSettings(false)}>
-                Cancel
-              </button>
-              <button className="tui-btn primary" onClick={() => void saveSettings()}>
-                Save
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <SettingsModal
+        show={showSettings}
+        onClose={() => setShowSettings(false)}
+        displayName={displayName}
+        setDisplayName={setDisplayName}
+        rendezvousInput={rendezvousInput}
+        setRendezvousInput={setRendezvousInput}
+        turnUrl={turnUrl}
+        setTurnUrl={setTurnUrl}
+        turnUsername={turnUsername}
+        setTurnUsername={setTurnUsername}
+        turnCredential={turnCredential}
+        setTurnCredential={setTurnCredential}
+        nodeId={state.node.nodeId}
+        onSave={() => void saveSettings()}
+        onTestHealth={() => void testRendezvousHealth()}
+      />
 
-      {/* Help Modal */}
-      {showHelp && (
-        <div className="tui-modal-overlay" onClick={() => setShowHelp(false)}>
-          <div className="tui-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="tui-modal-header">felundchat — commands</div>
-            <div className="tui-modal-body">
-              <div className="tui-help-content">
-                <div className="tui-help-section">General</div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd">/help</span>
-                  <span className="tui-help-desc">Show this screen</span>
-                </div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd">/name &lt;name&gt;</span>
-                  <span className="tui-help-desc">Change your display name</span>
-                </div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd">/invite</span>
-                  <span className="tui-help-desc">Show invite code for the active circle</span>
-                </div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd">/settings</span>
-                  <span className="tui-help-desc">Open settings (display name, relay URL)</span>
-                </div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd">/join &lt;code&gt;</span>
-                  <span className="tui-help-desc">Join a circle using an invite code</span>
-                </div>
-                <div className="tui-help-section">Channels</div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd">/channels</span>
-                  <span className="tui-help-desc">List channels in the active circle</span>
-                </div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd">/channel create &lt;name&gt;</span>
-                  <span className="tui-help-desc">Create a new channel</span>
-                </div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd">/channel switch &lt;name&gt;</span>
-                  <span className="tui-help-desc">Switch to another channel</span>
-                </div>
-                <div className="tui-help-section">Calls</div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd">/call start</span>
-                  <span className="tui-help-desc">Start a call in the current channel</span>
-                </div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd">/call join</span>
-                  <span className="tui-help-desc">Join an active call</span>
-                </div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd">/call leave</span>
-                  <span className="tui-help-desc">Leave the current call</span>
-                </div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd">/call end</span>
-                  <span className="tui-help-desc">End the call (host only)</span>
-                </div>
-                <div className="tui-help-section">Keyboard shortcuts</div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd"><kbd>F1</kbd></span>
-                  <span className="tui-help-desc">Help</span>
-                </div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd"><kbd>F2</kbd></span>
-                  <span className="tui-help-desc">Invite code</span>
-                </div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd"><kbd>F3</kbd></span>
-                  <span className="tui-help-desc">Settings</span>
-                </div>
-                <div className="tui-help-row">
-                  <span className="tui-help-cmd"><kbd>Escape</kbd></span>
-                  <span className="tui-help-desc">Close modals · focus input</span>
-                </div>
-              </div>
-            </div>
-            <div className="tui-modal-actions">
-              <button className="tui-btn primary" onClick={() => setShowHelp(false)}>
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <HelpModal show={showHelp} onClose={() => setShowHelp(false)} />
 
-      {/* Invite Modal */}
-      {showInvite && inviteCode && (
-        <div className="tui-modal-overlay" onClick={() => setShowInvite(false)}>
-          <div className="tui-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="tui-modal-header">
-              Invite Code — {currentCircle?.name || currentCircleId?.slice(0, 8)}
-            </div>
-            <div className="tui-modal-body">
-              <p className="tui-dim" style={{ margin: 0, fontSize: '0.78rem' }}>
-                Share this code with others to join{' '}
-                <strong>{currentCircle?.name || 'this circle'}</strong>.
-              </p>
-              <pre className="tui-invite-code" data-testid="invite-code">{inviteCode}</pre>
-            </div>
-            <div className="tui-modal-actions">
-              <button className="tui-btn" onClick={() => setShowInvite(false)}>
-                Close
-              </button>
-              <button className="tui-btn primary" onClick={() => void copyInviteCode(inviteCode)}>
-                {inviteCopied ? '✓ Copied!' : 'Copy to clipboard'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <InviteModal
+        show={showInvite}
+        onClose={() => setShowInvite(false)}
+        inviteCode={inviteCode}
+        circleName={currentCircle?.name || currentCircleId?.slice(0, 8) || ''}
+        inviteCopied={inviteCopied}
+        onCopy={(code) => void copyInviteCode(code)}
+      />
 
-      {/* Call Modal — F4 */}
-      {showCall && currentCircleId && (
-        <div className="tui-modal-overlay" onClick={() => setShowCall(false)}>
-          <div className="tui-modal tui-call-modal" onClick={(e) => e.stopPropagation()} data-testid="call-modal">
-            <div className="tui-modal-header">
-              {amInCall ? '◈ Call' : '◇ Call'}
-              {activeCall && (
-                <span style={{ fontWeight: 'normal', fontSize: '0.78rem', marginLeft: '0.6rem', opacity: 0.75 }}>
-                  {activeCall.participants.length} participant{activeCall.participants.length !== 1 ? 's' : ''}
-                </span>
-              )}
-            </div>
-            <div className="tui-modal-body">
-              {amInCall ? (
-                <>
-                  <div className="tui-dim" style={{ fontSize: '0.72rem', marginBottom: '0.6rem' }}>
-                    <div>
-                      local audio: {callManagerRef.current?.localStream?.getAudioTracks().length ?? 0}
-                      {' '}enabled:{' '}
-                      {callManagerRef.current?.localStream?.getAudioTracks().filter((t) => t.enabled).length ?? 0}
-                    </div>
-                    <div>
-                      local video: {callManagerRef.current?.localStream?.getVideoTracks().length ?? 0}
-                      {' '}enabled:{' '}
-                      {callManagerRef.current?.localStream?.getVideoTracks().filter((t) => t.enabled).length ?? 0}
-                    </div>
-                    <div>
-                      remote streams: {Object.keys(remoteStreams).length}
-                      {' '}audio:{' '}
-                      {Object.values(remoteStreams).reduce(
-                        (sum, s) => sum + s.getAudioTracks().length,
-                        0,
-                      )}
-                      {' '}video:{' '}
-                      {Object.values(remoteStreams).reduce(
-                        (sum, s) => sum + s.getVideoTracks().length,
-                        0,
-                      )}
-                    </div>
-                  </div>
-                  <div style={{ marginBottom: '0.6rem' }}>
-                    <label style={{ display: 'block', marginBottom: '0.35rem' }}>
-                      Microphone
-                      <select
-                        value={selectedInputId}
-                        onChange={(e) => {
-                          const nextId = e.target.value
-                          setSelectedInputId(nextId)
-                          void (async () => {
-                            const mgr = callManagerRef.current
-                            if (!mgr) return
-                            const ok = await mgr.setAudioInput(nextId || null)
-                            if (!ok) {
-                              setStatus('Microphone switch failed — check permissions or device.')
-                            } else if (callManagerRef.current === mgr) {
-                              setCallLocalStream(mgr.localStream)
-                            }
-                          })()
-                        }}
-                      >
-                        <option value="">Default</option>
-                        {audioInputs.map((d) => (
-                          <option key={d.deviceId} value={d.deviceId}>
-                            {d.label || `Microphone ${d.deviceId.slice(0, 6)}`}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label style={{ display: 'block' }}>
-                      Speaker
-                      <select
-                        value={selectedOutputId}
-                        onChange={(e) => setSelectedOutputId(e.target.value)}
-                      >
-                        <option value="">Default</option>
-                        {audioOutputs.map((d) => (
-                          <option key={d.deviceId} value={d.deviceId}>
-                            {d.label || `Speaker ${d.deviceId.slice(0, 6)}`}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
-                  {/* Video grid — shown when camera is on */}
-                  {isVideoOn && (
-                    <div className="tui-call-video-grid">
-                      {callManagerRef.current?.localStream && (
-                        <video
-                          autoPlay
-                          playsInline
-                          muted
-                          data-testid="call-local-video"
-                          ref={(el) => {
-                            if (el && callManagerRef.current?.localStream)
-                              el.srcObject = callManagerRef.current.localStream
-                          }}
-                          className="tui-call-video tui-call-video-local"
-                        />
-                      )}
-                      {Object.entries(remoteStreams).map(([peerId, stream]) => (
-                        <video
-                          key={peerId}
-                          autoPlay
-                          playsInline
-                          data-testid="call-remote-video"
-                          ref={(el) => {
-                            if (el) el.srcObject = stream
-                          }}
-                          className="tui-call-video"
-                        />
-                      ))}
-                    </div>
-                  )}
-                  {/* Participant list */}
-                  {activeCall && (
-                    <div className="tui-call-modal-participants">
-                      {activeCall.participants.map((nodeId) => {
-                        const peerState =
-                          nodeId !== state.node.nodeId ? callPeerStates[nodeId] : undefined
-                        return (
-                          <div key={nodeId} className="tui-call-participant">
-                            {nodeId === activeCall.hostNodeId ? '★' : '·'}{' '}
-                            {nodeId.slice(0, 8)}
-                            {nodeId === state.node.nodeId ? ' (you)' : ''}
-                            {peerState && (
-                              <span className={`tui-peer-state ${peerState}`}>
-                                {peerState === 'connected'
-                                  ? ' ○'
-                                  : peerState === 'connecting'
-                                    ? ' ◌'
-                                    : ' ✕'}
-                              </span>
-                            )}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                  {/* VU meters */}
-                  <div className="tui-vu-meters">
-                    <div className="tui-vu-row">
-                      <span className="tui-vu-label">you</span>
-                      <VUMeter stream={callLocalStream} />
-                    </div>
-                    {Object.entries(remoteStreams).map(([peerId, stream]) => (
-                      <div key={peerId} className="tui-vu-row">
-                        <span className="tui-vu-label">{peerId.slice(0, 6)}</span>
-                        <VUMeter stream={stream} />
-                      </div>
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <p className="tui-dim" style={{ margin: 0 }}>
-                  {activeCall
-                    ? 'A call is active in this channel. Join to connect your audio/video.'
-                    : 'No active call in this channel.'}
-                </p>
-              )}
-            </div>
-            <div className="tui-modal-actions">
-              {amInCall ? (
-                <>
-                  <button
-                    className={`tui-btn ${isMuted ? '' : 'primary'}`}
-                    onClick={() => {
-                      const m = !isMuted
-                      setIsMuted(m)
-                      callManagerRef.current?.muteAudio(m)
-                    }}
-                    data-testid="call-mute"
-                  >
-                    {isMuted ? '⊗ Muted' : '◎ Mic'}
-                  </button>
-                  <button
-                    className={`tui-btn ${isVideoOn ? 'primary' : ''}`}
-                    onClick={() => {
-                      const v = !isVideoOn
-                      setIsVideoOn(v)
-                      void callManagerRef.current?.enableVideo(v)
-                    }}
-                    data-testid="call-cam"
-                  >
-                    {isVideoOn ? '⊡ Cam' : '⊞ Cam'}
-                  </button>
-                  <button
-                    className="tui-btn"
-                    onClick={() =>
-                      void (async () => {
-                        const next = { ...state, activeCalls: { ...state.activeCalls } }
-                        await leaveCall(next, activeCall!.sessionId)
-                        await persist(next)
-                        setShowCall(false)
-                      })()
-                    }
-                    data-testid="call-leave"
-                  >
-                    Leave
-                  </button>
-                  {amHost && (
-                    <button
-                      className="tui-btn"
-                      onClick={() =>
-                        void (async () => {
-                          const next = { ...state, activeCalls: { ...state.activeCalls } }
-                          await endCall(next, activeCall!.sessionId)
-                          await persist(next)
-                          setShowCall(false)
-                        })()
-                      }
-                      data-testid="call-end"
-                    >
-                      End
-                    </button>
-                  )}
-                  <button className="tui-btn" onClick={() => setShowCall(false)} data-testid="call-close">
-                    Close
-                  </button>
-                </>
-              ) : (
-                <>
-                  {!activeCall ? (
-                    <button
-                      className="tui-btn primary"
-                      onClick={() =>
-                        void (async () => {
-                          const next = { ...state, activeCalls: { ...state.activeCalls } }
-                          await createCall(next)
-                          await persist(next)
-                        })()
-                      }
-                      data-testid="call-start"
-                    >
-                      Start call
-                    </button>
-                  ) : (
-                    <button
-                      className="tui-btn primary"
-                      onClick={() =>
-                        void (async () => {
-                          const next = { ...state, activeCalls: { ...state.activeCalls } }
-                          await joinCall(next, activeCall.sessionId)
-                          await persist(next)
-                        })()
-                      }
-                      data-testid="call-join"
-                    >
-                      Join call
-                    </button>
-                  )}
-                  <button className="tui-btn" onClick={() => setShowCall(false)} data-testid="call-cancel">
-                    Cancel
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      <CallModal
+        show={showCall}
+        onClose={() => setShowCall(false)}
+        currentCircleId={currentCircleId}
+        amInCall={amInCall}
+        amHost={amHost}
+        activeCall={activeCall}
+        callManagerRef={callManagerRef}
+        remoteStreams={remoteStreams}
+        callPeerStates={callPeerStates}
+        callLocalStream={callLocalStream}
+        setCallLocalStream={setCallLocalStream}
+        isMuted={isMuted}
+        setIsMuted={setIsMuted}
+        isVideoOn={isVideoOn}
+        setIsVideoOn={setIsVideoOn}
+        audioInputs={audioInputs}
+        audioOutputs={audioOutputs}
+        selectedInputId={selectedInputId}
+        setSelectedInputId={setSelectedInputId}
+        selectedOutputId={selectedOutputId}
+        setSelectedOutputId={setSelectedOutputId}
+        setStatus={setStatus}
+        nodeId={state.node.nodeId}
+        state={state}
+        persist={persist}
+      />
     </div>
   )
 }
