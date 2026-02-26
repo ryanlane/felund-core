@@ -159,6 +159,29 @@
   font-size: 0.83rem;
 }
 
+.tui-day-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.6rem 0 0.3rem;
+  user-select: none;
+}
+
+.tui-day-divider::before,
+.tui-day-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: #1a1a32;
+}
+
+.tui-day-divider-label {
+  font-size: 0.67rem;
+  color: #3a3a58;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
 .tui-message {
   font-size: 0.87rem;
   line-height: 1.55;
@@ -166,7 +189,35 @@
   word-break: break-word;
 }
 
-.tui-ts { color: #3a3a58; }
+.tui-ts {
+  color: #3a3a58;
+  position: relative;
+  cursor: default;
+  white-space: nowrap;
+}
+
+/* Full-date tooltip shown on hover via data-full-ts attribute */
+.tui-ts::after {
+  content: attr(data-full-ts);
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 3px);
+  background: #1a1a30;
+  border: 1px solid #3a3a5a;
+  color: #c0c0cc;
+  font-size: 0.7rem;
+  white-space: nowrap;
+  padding: 0.18rem 0.5rem;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+  z-index: 50;
+}
+
+.tui-ts:hover::after {
+  opacity: 1;
+}
+
 .tui-author { color: #7a9fff; font-weight: bold; }
 .tui-author.is-self { color: #00c8a8; }
 .tui-colon { color: #4a4a6a; }

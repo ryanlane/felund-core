@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import './App.css'
 import { parseInviteCode, makeInviteCode } from './core/invite'
@@ -30,7 +30,14 @@ import type { WsStatus } from './network/relay'
 import { WebRTCTransport } from './network/transport'
 import { WebRTCCallManager } from './network/call'
 import type { CallPeerState } from './network/call'
-import { formatTime, peerColor } from './utils/peerColor'
+import {
+  formatTime,
+  formatFullTimestamp,
+  formatDayHeader,
+  isSameDay,
+  peerColor,
+} from './utils/peerColor'
+import type { TimeFormat } from './utils/peerColor'
 import { SetupScreen } from './components/SetupScreen'
 import { SettingsModal } from './components/SettingsModal'
 import { HelpModal } from './components/HelpModal'
@@ -77,6 +84,7 @@ function App() {
   const [turnUrl, setTurnUrl] = useState('')
   const [turnUsername, setTurnUsername] = useState('')
   const [turnCredential, setTurnCredential] = useState('')
+  const [timeFormat, setTimeFormat] = useState<TimeFormat>('24h')
 
   // Keep a ref to the latest state so polling closures always see fresh data
   const stateRef = useRef<State | null>(null)
@@ -150,6 +158,7 @@ function App() {
       setTurnUrl(loaded.settings.turnUrl ?? '')
       setTurnUsername(loaded.settings.turnUsername ?? '')
       setTurnCredential(loaded.settings.turnCredential ?? '')
+      setTimeFormat(loaded.settings.timeFormat ?? '24h')
     })()
   }, [])
 
@@ -772,6 +781,7 @@ function App() {
         turnUrl: turnUrl.trim(),
         turnUsername: turnUsername.trim(),
         turnCredential: turnCredential.trim(),
+        timeFormat,
       },
     }
     await persist(next)
@@ -981,20 +991,32 @@ function App() {
             {messages.length === 0 && (
               <div className="tui-empty">No messages yet — type below to start chatting.</div>
             )}
-            {messages.map((msg) => {
+            {messages.map((msg, i) => {
               const isSelf = msg.authorNodeId === state.node.nodeId
+              const prevMsg = messages[i - 1]
+              const showDivider = !prevMsg || !isSameDay(prevMsg.createdTs, msg.createdTs)
               return (
-                <div key={msg.msgId} className="tui-message">
-                  <span className="tui-ts">[{formatTime(msg.createdTs)}]</span>{' '}
-                  <span
-                    className={`tui-author${isSelf ? ' is-self' : ''}`}
-                    style={isSelf ? undefined : { color: peerColor(msg.authorNodeId) }}
-                  >
-                    {msg.displayName}
-                  </span>
-                  <span className="tui-colon">:</span>{' '}
-                  <span className="tui-text">{msg.text}</span>
-                </div>
+                <Fragment key={msg.msgId}>
+                  {showDivider && (
+                    <div className="tui-day-divider">
+                      <span className="tui-day-divider-label">{formatDayHeader(msg.createdTs)}</span>
+                    </div>
+                  )}
+                  <div className="tui-message">
+                    <span
+                      className="tui-ts"
+                      data-full-ts={formatFullTimestamp(msg.createdTs, timeFormat)}
+                    >[{formatTime(msg.createdTs, timeFormat)}]</span>{' '}
+                    <span
+                      className={`tui-author${isSelf ? ' is-self' : ''}`}
+                      style={isSelf ? undefined : { color: peerColor(msg.authorNodeId) }}
+                    >
+                      {msg.displayName}
+                    </span>
+                    <span className="tui-colon">:</span>{' '}
+                    <span className="tui-text">{msg.text}</span>
+                  </div>
+                </Fragment>
               )
             })}
             <div ref={messagesEndRef} />
@@ -1075,6 +1097,8 @@ function App() {
         setTurnUsername={setTurnUsername}
         turnCredential={turnCredential}
         setTurnCredential={setTurnCredential}
+        timeFormat={timeFormat}
+        setTimeFormat={setTimeFormat}
         nodeId={state.node.nodeId}
         onSave={() => void saveSettings()}
         onTestHealth={() => void testRendezvousHealth()}

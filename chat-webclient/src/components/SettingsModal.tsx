@@ -1,3 +1,5 @@
+import type { TimeFormat } from '../utils/peerColor'
+
 interface SettingsModalProps {
   show: boolean
   onClose: () => void
@@ -11,6 +13,8 @@ interface SettingsModalProps {
   setTurnUsername: (v: string) => void
   turnCredential: string
   setTurnCredential: (v: string) => void
+  timeFormat: TimeFormat
+  setTimeFormat: (v: TimeFormat) => void
   nodeId: string
   onSave: () => void
   onTestHealth: () => void
@@ -29,6 +33,8 @@ export function SettingsModal({
   setTurnUsername,
   turnCredential,
   setTurnCredential,
+  timeFormat,
+  setTimeFormat,
   nodeId,
   onSave,
   onTestHealth,
@@ -78,6 +84,25 @@ export function SettingsModal({
               value={turnCredential}
               onChange={(e) => setTurnCredential(e.target.value)}
             />
+          </label>
+          <label>
+            Time format
+            <div className="tui-tab-row">
+              <button
+                type="button"
+                className={`tui-tab ${timeFormat === '24h' ? 'active' : ''}`}
+                onClick={() => setTimeFormat('24h')}
+              >
+                24h
+              </button>
+              <button
+                type="button"
+                className={`tui-tab ${timeFormat === '12h' ? 'active' : ''}`}
+                onClick={() => setTimeFormat('12h')}
+              >
+                12h AM/PM
+              </button>
+            </div>
           </label>
           <p className="tui-dim" style={{ margin: 0, fontSize: '0.78rem' }}>
             node: {nodeId}

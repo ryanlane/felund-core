@@ -54,6 +54,7 @@ export interface State {
     turnUrl?: string
     turnUsername?: string
     turnCredential?: string
+    timeFormat?: '24h' | '12h'
   }
   circles: Record<string, Circle>
   channels: Record<string, Record<string, Channel>>
