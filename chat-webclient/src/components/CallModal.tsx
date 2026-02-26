@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { CallSession, State } from '../core/models'
 import { createCall, endCall, joinCall, leaveCall } from '../core/state'
 import type { CallPeerState } from '../network/call'
@@ -59,7 +60,17 @@ export function CallModal({
   state,
   persist,
 }: CallModalProps) {
+  const [showDevices, setShowDevices] = useState(false)
+
   if (!show || !currentCircleId) return null
+
+  const localAudioTracks = callManagerRef.current?.localStream?.getAudioTracks() ?? []
+  const localVideoTracks = callManagerRef.current?.localStream?.getVideoTracks() ?? []
+  const localAudioEnabled = localAudioTracks.filter((t) => t.enabled).length
+  const localVideoEnabled = localVideoTracks.filter((t) => t.enabled).length
+  const remoteCount = Object.keys(remoteStreams).length
+  const remoteAudio = Object.values(remoteStreams).reduce((s, r) => s + r.getAudioTracks().length, 0)
+  const remoteVideo = Object.values(remoteStreams).reduce((s, r) => s + r.getVideoTracks().length, 0)
 
   return (
     <div className="tui-modal-overlay" onClick={onClose}>
@@ -75,74 +86,6 @@ export function CallModal({
         <div className="tui-modal-body">
           {amInCall ? (
             <>
-              <div className="tui-dim" style={{ fontSize: '0.72rem', marginBottom: '0.6rem' }}>
-                <div>
-                  local audio: {callManagerRef.current?.localStream?.getAudioTracks().length ?? 0}
-                  {' '}enabled:{' '}
-                  {callManagerRef.current?.localStream?.getAudioTracks().filter((t) => t.enabled).length ?? 0}
-                </div>
-                <div>
-                  local video: {callManagerRef.current?.localStream?.getVideoTracks().length ?? 0}
-                  {' '}enabled:{' '}
-                  {callManagerRef.current?.localStream?.getVideoTracks().filter((t) => t.enabled).length ?? 0}
-                </div>
-                <div>
-                  remote streams: {Object.keys(remoteStreams).length}
-                  {' '}audio:{' '}
-                  {Object.values(remoteStreams).reduce(
-                    (sum, s) => sum + s.getAudioTracks().length,
-                    0,
-                  )}
-                  {' '}video:{' '}
-                  {Object.values(remoteStreams).reduce(
-                    (sum, s) => sum + s.getVideoTracks().length,
-                    0,
-                  )}
-                </div>
-              </div>
-              <div style={{ marginBottom: '0.6rem' }}>
-                <label style={{ display: 'block', marginBottom: '0.35rem' }}>
-                  Microphone
-                  <select
-                    value={selectedInputId}
-                    onChange={(e) => {
-                      const nextId = e.target.value
-                      setSelectedInputId(nextId)
-                      void (async () => {
-                        const mgr = callManagerRef.current
-                        if (!mgr) return
-                        const ok = await mgr.setAudioInput(nextId || null)
-                        if (!ok) {
-                          setStatus('Microphone switch failed — check permissions or device.')
-                        } else if (callManagerRef.current === mgr) {
-                          setCallLocalStream(mgr.localStream)
-                        }
-                      })()
-                    }}
-                  >
-                    <option value="">Default</option>
-                    {audioInputs.map((d) => (
-                      <option key={d.deviceId} value={d.deviceId}>
-                        {d.label || `Microphone ${d.deviceId.slice(0, 6)}`}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label style={{ display: 'block' }}>
-                  Speaker
-                  <select
-                    value={selectedOutputId}
-                    onChange={(e) => setSelectedOutputId(e.target.value)}
-                  >
-                    <option value="">Default</option>
-                    {audioOutputs.map((d) => (
-                      <option key={d.deviceId} value={d.deviceId}>
-                        {d.label || `Speaker ${d.deviceId.slice(0, 6)}`}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
               {/* Video grid — shown when camera is on */}
               {isVideoOn && (
                 <div className="tui-call-video-grid">
@@ -275,6 +218,13 @@ export function CallModal({
                   End
                 </button>
               )}
+              <button
+                className={`tui-btn ${showDevices ? 'primary' : ''}`}
+                onClick={() => setShowDevices((v) => !v)}
+                data-testid="call-devices"
+              >
+                Devices
+              </button>
               <button className="tui-btn" onClick={onClose} data-testid="call-close">
                 Close
               </button>
@@ -316,6 +266,85 @@ export function CallModal({
             </>
           )}
         </div>
+        {amInCall && showDevices && (
+          <div className="tui-call-devices">
+            <label>
+              Microphone
+              <select
+                className="tui-call-select"
+                value={selectedInputId}
+                onChange={(e) => {
+                  const nextId = e.target.value
+                  setSelectedInputId(nextId)
+                  void (async () => {
+                    const mgr = callManagerRef.current
+                    if (!mgr) return
+                    const ok = await mgr.setAudioInput(nextId || null)
+                    if (!ok) {
+                      setStatus('Microphone switch failed — check permissions or device.')
+                    } else if (callManagerRef.current === mgr) {
+                      setCallLocalStream(mgr.localStream)
+                    }
+                  })()
+                }}
+              >
+                <option value="">Default</option>
+                {audioInputs.map((d) => (
+                  <option key={d.deviceId} value={d.deviceId}>
+                    {d.label || `Microphone ${d.deviceId.slice(0, 6)}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Speaker
+              <select
+                className="tui-call-select"
+                value={selectedOutputId}
+                onChange={(e) => setSelectedOutputId(e.target.value)}
+              >
+                <option value="">Default</option>
+                {audioOutputs.map((d) => (
+                  <option key={d.deviceId} value={d.deviceId}>
+                    {d.label || `Speaker ${d.deviceId.slice(0, 6)}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
+        {amInCall && (
+          <div className="tui-call-status-bar">
+            <span className="tui-call-stat-group">
+              <span className="tui-call-stat-label">mic</span>
+              <span className={localAudioEnabled > 0 ? 'tui-call-stat-val active' : 'tui-call-stat-val'}>
+                {localAudioEnabled}/{localAudioTracks.length}
+              </span>
+            </span>
+            <span className="tui-call-stat-sep">·</span>
+            <span className="tui-call-stat-group">
+              <span className="tui-call-stat-label">cam</span>
+              <span className={localVideoEnabled > 0 ? 'tui-call-stat-val active' : 'tui-call-stat-val'}>
+                {localVideoEnabled}/{localVideoTracks.length}
+              </span>
+            </span>
+            <span className="tui-call-stat-sep">·</span>
+            <span className="tui-call-stat-group">
+              <span className="tui-call-stat-label">peers</span>
+              <span className={remoteCount > 0 ? 'tui-call-stat-val active' : 'tui-call-stat-val'}>
+                {remoteCount}
+              </span>
+            </span>
+            <span className="tui-call-stat-sep">·</span>
+            <span className="tui-call-stat-group">
+              <span className="tui-call-stat-label">a</span>
+              <span className="tui-call-stat-val">{remoteAudio}</span>
+              <span className="tui-call-stat-sep"> /</span>
+              <span className="tui-call-stat-label"> v</span>
+              <span className="tui-call-stat-val">{remoteVideo}</span>
+            </span>
+          </div>
+        )}
       </div>
     </div>
   )

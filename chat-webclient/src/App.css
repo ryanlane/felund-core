@@ -571,6 +571,83 @@ kbd {
   color: #e8c44a;
 }
 
+/* ── Call modal status bar ───────────────────────────────────────────────── */
+
+.tui-call-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.85rem;
+  background: #0a0a12;
+  border-top: 1px solid #1a1a30;
+  font-size: 0.68rem;
+  font-family: inherit;
+}
+
+.tui-call-stat-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+}
+
+.tui-call-stat-label {
+  color: #3a3a5a;
+  user-select: none;
+}
+
+.tui-call-stat-sep {
+  color: #252540;
+  user-select: none;
+}
+
+.tui-call-stat-val {
+  color: #4a4a6a;
+  min-width: 1ch;
+}
+
+.tui-call-stat-val.active {
+  color: #00c8a8;
+}
+
+/* ── Call device panel ───────────────────────────────────────────────────── */
+
+.tui-call-devices {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.7rem 0.85rem;
+  border-top: 1px solid #1e1e38;
+  background: #0f0f18;
+}
+
+.tui-call-devices label {
+  display: grid;
+  gap: 0.28rem;
+  font-size: 0.78rem;
+  color: #6666aa;
+}
+
+.tui-call-select {
+  background: #0c0c18;
+  border: 1px solid #2a2a4a;
+  color: #c8c8d8;
+  padding: 0.38rem 0.55rem;
+  font-family: inherit;
+  font-size: 0.82rem;
+  outline: none;
+  border-radius: 0;
+  cursor: pointer;
+  appearance: auto;
+}
+
+.tui-call-select:focus {
+  border-color: #00c8a8;
+}
+
+.tui-call-select option {
+  background: #0c0c18;
+  color: #c8c8d8;
+}
+
 /* ── VU meters ─────────────────────────────────────────────────────────────── */
 
 .tui-vu-meters {
