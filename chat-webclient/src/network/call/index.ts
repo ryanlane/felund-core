@@ -396,11 +396,17 @@ export class WebRTCCallManager {
         return
       }
       // postSignal returns false without throwing when the send fails (it
-      // catches internally).  The SignalingClient will retry in the background,
-      // but if all retries are eventually exhausted, no answer will ever arrive
-      // and negotiating would be permanently stuck.  Reset now so that
-      // onnegotiationneeded can fire again once the connection recovers.
-      console.warn('[call] renegotiation offer send failed; resetting negotiating flag')
+      // catches internally).  Roll back the local offer so the PC returns to
+      // stable — without this, the next onnegotiationneeded → createOffer()
+      // call would throw because the PC is still in have-local-offer state.
+      // Resetting negotiating=false below lets onnegotiationneeded retry once
+      // the connection recovers.
+      console.warn('[call] renegotiation offer send failed; rolling back')
+      try {
+        await session.pc.setLocalDescription({ type: 'rollback' })
+      } catch {
+        /* pc may already be closed */
+      }
     } catch (err) {
       console.warn('[call] renegotiation offer failed:', err)
     }
@@ -427,6 +433,12 @@ export class WebRTCCallManager {
       clearTimeout(session.iceTimer)
       session.iceTimer = null
     }
+    // Silence handlers before close() — some browsers fire a final ICE
+    // candidate or track event immediately after close() returns.
+    session.pc.onicecandidate = null
+    session.pc.onconnectionstatechange = null
+    session.pc.ontrack = null
+    session.pc.onnegotiationneeded = null
     try {
       session.pc.close()
     } catch {
