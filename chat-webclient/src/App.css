@@ -243,8 +243,8 @@
 .tui-input-row {
   flex: 0 0 auto;
   display: flex;
-  align-items: center;
-  padding: 0.4rem 0.85rem;
+  align-items: flex-end; /* Align prompt to bottom of textarea */
+  padding: 0.5rem 0.85rem;
   background: #0f0f13;
   border-top: 1px solid #1e1e38;
   gap: 0.45rem;
@@ -255,7 +255,7 @@
   font-weight: bold;
   font-size: 0.9rem;
   flex: 0 0 auto;
-  line-height: 1;
+  line-height: 1.4; /* Match textarea line-height for vertical alignment */
   user-select: none;
 }
 
@@ -264,8 +264,9 @@
   display: flex;
 }
 
-.tui-input-form input {
+.tui-input-form textarea {
   flex: 1;
+  min-width: 0;
   background: transparent;
   border: none;
   outline: none;
@@ -274,9 +275,17 @@
   font-size: 0.87rem;
   padding: 0;
   line-height: 1.4;
+  resize: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  overflow-x: hidden;
+  overflow-y: auto;
+  max-height: 33vh;
+  box-sizing: border-box;
 }
 
-.tui-input-form input::placeholder { color: #3a3a5a; }
+.tui-input-form textarea::placeholder { color: #3a3a5a; }
 
 /* ── Footer ────────────────────────────────────────────────────────────── */
 

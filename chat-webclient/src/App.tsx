@@ -96,7 +96,15 @@ function App() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // Ref for focusing the composer input (used by Escape shortcut)
-  const inputRef = useRef<HTMLInputElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  // Auto-expand textarea height as the message grows
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${el.scrollHeight}px`
+  }, [composer])
 
   const applySinkId = async (el: HTMLAudioElement, deviceId: string) => {
     const sink = (el as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }).setSinkId
@@ -611,8 +619,8 @@ function App() {
 
   // ── Message send ──────────────────────────────────────────────────────────
 
-  const handleSend = async (event: FormEvent) => {
-    event.preventDefault()
+  const handleSend = async (event?: FormEvent) => {
+    event?.preventDefault()
     if (!state || !composer.trim()) return
 
     const next = { ...state }
@@ -1054,10 +1062,18 @@ function App() {
       <div className="tui-input-row">
         <span className="tui-prompt">&gt;</span>
         <form className="tui-input-form" onSubmit={(e) => void handleSend(e)}>
-          <input
+          <textarea
             ref={inputRef}
+            rows={1}
             value={composer}
             onChange={(e) => setComposer(e.target.value)}
+            onKeyDown={(e) => {
+              // Send on Enter, but allow Shift+Enter for newlines
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                void handleSend()
+              }
+            }}
             placeholder="Type a message or /command…"
             autoFocus
           />
