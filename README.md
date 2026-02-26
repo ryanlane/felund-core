@@ -88,6 +88,38 @@ cp .env.example .env   # set VITE_FELUND_API_BASE
 npm install && npm run dev
 ```
 
+#### Web client keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `F1` | Help |
+| `F2` | Show invite code for active circle |
+| `F3` | Settings |
+| `F4` | Call panel |
+| `Escape` | Close modals · focus input |
+
+#### Web client slash commands
+
+| Command | Action |
+|---------|--------|
+| `/help` | Show help modal |
+| `/invite` | Show invite code for the active circle |
+| `/join <code>` | Join a circle via invite code |
+| `/circles` | List joined circles |
+| `/circle create <name>` | Create a new circle |
+| `/circle name <new-name>` | Rename the current circle (owner only) |
+| `/circle leave` | Leave the active circle |
+| `/circle join <code>` | Alias for `/join` |
+| `/channels` | List channels in the active circle |
+| `/channel create <name>` | Create a new channel |
+| `/channel switch <name>` | Switch to another channel |
+| `/call start` | Start a call in the current channel |
+| `/call join` | Join an active call |
+| `/call leave` | Leave the current call |
+| `/call end` | End the call (host only) |
+| `/name <new_name>` | Change your display name |
+| `/settings` | Open settings modal |
+
 ## Relay / rendezvous server
 
 An API server handles two concerns:
