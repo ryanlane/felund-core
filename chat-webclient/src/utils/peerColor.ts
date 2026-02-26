@@ -2,13 +2,15 @@ export type TimeFormat = '24h' | '12h'
 
 export const formatTime = (ts: number, format: TimeFormat = '24h'): string => {
   const d = new Date(ts * 1000)
+  const m = String(d.getMinutes()).padStart(2, '0')
   if (format === '12h') {
     const h = d.getHours()
-    const m = String(d.getMinutes()).padStart(2, '0')
     const ampm = h >= 12 ? 'PM' : 'AM'
-    return `${h % 12 || 12}:${m} ${ampm}`
+    const hDisplay = String(h % 12 || 12).padStart(2, ' ')
+    return `${hDisplay}:${m} ${ampm}`
   }
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  const hDisplay = String(d.getHours()).padStart(2, ' ')
+  return `${hDisplay}:${m}`
 }
 
 export const formatFullTimestamp = (ts: number, format: TimeFormat = '24h'): string => {

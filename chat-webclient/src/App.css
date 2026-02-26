@@ -193,7 +193,8 @@
   color: #3a3a58;
   position: relative;
   cursor: default;
-  white-space: nowrap;
+  white-space: pre;
+  font-size: 0.8em;
 }
 
 /* Full-date tooltip shown on hover via data-full-ts attribute */
