@@ -38,6 +38,8 @@ export class WebRTCCallManager {
   private stopped = false
   /** Resolves when startMedia() has finished (success or failure). */
   private mediaReady: Promise<void> = Promise.resolve()
+  /** True while a getUserMedia request from startMedia() is in flight. */
+  private mediaStartInFlight = false
   /**
    * Candidates that arrived before the session existed or before
    * setRemoteDescription() was called.  Flushed after setRemoteDescription().
@@ -60,8 +62,19 @@ export class WebRTCCallManager {
   /**
    * Acquire getUserMedia and store the local stream.
    * Must be called before connectToPeer so tracks are ready for addTrack().
+   *
+   * Idempotent while in progress: concurrent callers await the same underlying
+   * request instead of launching a second getUserMedia that would race to
+   * overwrite this.localStream.  If audio is already live, returns immediately.
    */
   async startMedia(video: boolean): Promise<boolean> {
+    if (this.mediaStartInFlight) {
+      await this.mediaReady
+      return (this.localStream?.getAudioTracks().length ?? 0) > 0
+    }
+    if (this.hasLiveAudio()) return true
+
+    this.mediaStartInFlight = true
     this.mediaReady = (async () => {
       try {
         this.localStream = await navigator.mediaDevices.getUserMedia({
@@ -78,6 +91,8 @@ export class WebRTCCallManager {
             console.warn('[call] getUserMedia (audio-only fallback) failed:', err2)
           }
         }
+      } finally {
+        this.mediaStartInFlight = false
       }
     })()
     await this.mediaReady
@@ -326,12 +341,22 @@ export class WebRTCCallManager {
       }
     }
 
-    // addTrack() is idempotent on MediaStream per spec — no duplicate check needed.
+    // Only notify the UI when at least one track is genuinely new.
+    // During renegotiation, event.streams[0] contains all tracks (old + new),
+    // so ontrack would otherwise call onRemoteStream multiple times with the
+    // same stream object for tracks already connected to the UI.
     pc.ontrack = (event) => {
       if (this.stopped) return
+      const existing = new Set(remoteStream.getTracks().map((t) => t.id))
       const tracks = event.streams[0] ? event.streams[0].getTracks() : [event.track]
-      for (const track of tracks) remoteStream.addTrack(track)
-      this.config.onRemoteStream(peerId, remoteStream)
+      let added = false
+      for (const track of tracks) {
+        if (!existing.has(track.id)) {
+          remoteStream.addTrack(track)
+          added = true
+        }
+      }
+      if (added) this.config.onRemoteStream(peerId, remoteStream)
     }
 
     // Perfect negotiation: either side may initiate renegotiation (e.g., when

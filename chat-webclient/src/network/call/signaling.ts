@@ -114,6 +114,9 @@ export class SignalingClient {
       }
       this.signalBackoffMs = 0
       this.signalBackoffUntil = 0
+      // After posting an offer or answer, poll shortly to pick up the
+      // remote response without waiting a full SIGNAL_POLL_MS interval.
+      if (type !== 'media-candidate') this.scheduleEagerPoll()
       return true
     } catch (err) {
       console.warn('[call] postSignal error:', err)
@@ -122,6 +125,20 @@ export class SignalingClient {
   }
 
   // ── Private ────────────────────────────────────────────────────────────────
+
+  /**
+   * Schedule a one-shot poll shortly after posting an offer or answer.
+   * The regular interval continues unchanged; this just fires an extra poll
+   * so the response (answer, or first ICE candidates) arrives ~150 ms after
+   * the post rather than up to SIGNAL_POLL_MS later.
+   * The pollInFlight guard in pollSignals() prevents concurrent requests.
+   */
+  private scheduleEagerPoll(): void {
+    if (this.stopped) return
+    setTimeout(() => {
+      if (!this.stopped && !this.pollInFlight) void this.pollSignals()
+    }, 150)
+  }
 
   private async pollSignals(): Promise<void> {
     if (this.stopped || this.pollInFlight) return
