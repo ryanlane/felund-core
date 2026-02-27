@@ -37,6 +37,26 @@ npm install
 npm run dev
 ```
 
+## Project structure
+
+```
+chat-webclient/
+├── public/                  # Static assets
+├── src/
+│   ├── components/           # React UI components + modals
+│   ├── core/                 # State, models, invite, crypto helpers
+│   ├── network/              # Relay + rendezvous + WebRTC signaling
+│   ├── utils/                # Formatting + peer color helpers
+│   ├── App.tsx               # Main app shell
+│   ├── App.css               # TUI-inspired styling
+│   └── main.tsx              # React entry point
+├── tests/                    # Playwright tests
+├── index.html                # Vite HTML entry
+├── vite.config.ts            # Vite config
+├── tsconfig.json             # Base TS config
+└── package.json              # Scripts + dependencies
+```
+
 ## E2E tests (Phase 5 call media)
 
 These tests spin up the WebRTC media call flow across two Chromium contexts
