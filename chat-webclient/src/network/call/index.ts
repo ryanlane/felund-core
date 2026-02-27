@@ -26,6 +26,7 @@ import type { CallManagerConfig, CallPeerSession, CallPeerState, SignalData } fr
 import { ICE_TIMEOUT_MS } from './types'
 
 export type { CallPeerState, CallManagerConfig } from './types'
+export { MAX_BROADCAST_VIEWERS } from './types'
 
 // ── WebRTCCallManager ─────────────────────────────────────────────────────────
 
@@ -151,6 +152,45 @@ export class WebRTCCallManager {
       await this.signaling.postSignal(sessionId, peerId, 'media-offer', JSON.stringify(offer))
     } catch (err) {
       console.warn('[call] offer failed:', err)
+      this.closeSession(session, 'failed')
+    }
+  }
+
+  /**
+   * Connect to a receive-only viewer as the broadcast host.
+   * The host always creates the offer regardless of nodeId ordering.
+   * Calling this repeatedly for the same viewer is a no-op.
+   */
+  async connectToViewer(viewerId: string): Promise<void> {
+    if (this.stopped) return
+    const sessionId = this.makeSessionId(viewerId)
+    if (this.sessions.has(sessionId)) return
+
+    await this.mediaReady
+    if (this.stopped || this.sessions.has(sessionId)) return
+
+    const hasAudio = await this.ensureAudioTrack()
+    if (!hasAudio) {
+      console.warn('[call] no local audio track; skipping broadcast offer')
+      return
+    }
+
+    const session = this.createPeerSession(sessionId, viewerId, true)
+    this.sessions.set(sessionId, session)
+    session.negotiating = true
+
+    if (this.localStream) {
+      for (const track of this.localStream.getTracks()) {
+        session.pc.addTrack(track, this.localStream)
+      }
+    }
+
+    try {
+      const offer = await session.pc.createOffer()
+      await session.pc.setLocalDescription(offer)
+      await this.signaling.postSignal(sessionId, viewerId, 'media-offer', JSON.stringify(offer))
+    } catch (err) {
+      console.warn('[call] broadcast offer failed:', err)
       this.closeSession(session, 'failed')
     }
   }
@@ -485,7 +525,8 @@ export class WebRTCCallManager {
         // below once the answer is sent, opening the door for future
         // renegotiations by either side.
         session.negotiating = true
-        if (this.localStream) {
+        // Viewers are receive-only — they do not addTrack to the host connection.
+        if (!this.config.isViewer && this.localStream) {
           for (const track of this.localStream.getTracks()) {
             session.pc.addTrack(track, this.localStream)
           }

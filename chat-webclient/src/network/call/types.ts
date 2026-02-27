@@ -18,12 +18,16 @@ export interface CallPeerSession {
   negotiating: boolean
 }
 
+export const MAX_BROADCAST_VIEWERS = 6
+
 export interface CallManagerConfig {
   nodeId: string
   callSessionId: string
   circleId: string
   rendezvousBase: string
   iceServers: RTCIceServer[]
+  /** True when this node joins the call as a receive-only viewer (1→many broadcast). */
+  isViewer?: boolean
   onRemoteStream: (peerId: string, stream: MediaStream) => void
   onRemoteStreamEnd: (peerId: string) => void
   onPeerStateChange: (peerId: string, state: CallPeerState) => void

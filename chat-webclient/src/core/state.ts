@@ -319,6 +319,25 @@ export const applyControlEvents = (state: State, msgs: ChatMessage[]): boolean =
             }
             changed = true
           }
+        } else if (op === 'view') {
+          const nodeId = String(e['node_id'] ?? actorNodeId).trim()
+          if (nodeId && !call.viewers.includes(nodeId)) {
+            call.viewers = [...call.viewers, nodeId].sort()
+            if (call.callState === 'pending') call.callState = 'active'
+            changed = true
+          }
+        } else if (op === 'revoke') {
+          // Only the host may revoke.
+          if (!actorNodeId || actorNodeId === call.hostNodeId) {
+            const targetNodeId = String(e['target_node_id'] ?? '').trim()
+            if (targetNodeId) {
+              const hadIt =
+                call.participants.includes(targetNodeId) || call.viewers.includes(targetNodeId)
+              call.participants = call.participants.filter((id) => id !== targetNodeId)
+              call.viewers = call.viewers.filter((id) => id !== targetNodeId)
+              if (hadIt) changed = true
+            }
+          }
         } else if (op === 'leave') {
           const nodeId = String(e['node_id'] ?? actorNodeId).trim()
           if (nodeId) {
@@ -460,6 +479,46 @@ export const endCall = async (state: State, sessionId: string): Promise<ChatMess
   const msg = await makeCallEventMsg(state, call.circleId, event)
   state.messages[msg.msgId] = msg
   delete state.activeCalls[sessionId]
+  return msg
+}
+
+/** Join a call as a receive-only viewer and return the CALL_EVT message. */
+export const watchCall = async (state: State, sessionId: string): Promise<ChatMessage | null> => {
+  const call = state.activeCalls[sessionId]
+  if (!call) return null
+  const event = {
+    t: 'CALL_EVT',
+    op: 'view',
+    session_id: sessionId,
+    node_id: state.node.nodeId,
+  }
+  const msg = await makeCallEventMsg(state, call.circleId, event)
+  state.messages[msg.msgId] = msg
+  if (!call.viewers.includes(state.node.nodeId)) {
+    call.viewers = [...call.viewers, state.node.nodeId].sort()
+    if (call.callState === 'pending') call.callState = 'active'
+  }
+  return msg
+}
+
+/** Revoke a viewer from a call (host only) and return the CALL_EVT message. */
+export const revokeViewer = async (
+  state: State,
+  sessionId: string,
+  targetNodeId: string,
+): Promise<ChatMessage | null> => {
+  const call = state.activeCalls[sessionId]
+  if (!call || call.hostNodeId !== state.node.nodeId) return null
+  const event = {
+    t: 'CALL_EVT',
+    op: 'revoke',
+    session_id: sessionId,
+    target_node_id: targetNodeId,
+  }
+  const msg = await makeCallEventMsg(state, call.circleId, event)
+  state.messages[msg.msgId] = msg
+  call.viewers = call.viewers.filter((id) => id !== targetNodeId)
+  call.participants = call.participants.filter((id) => id !== targetNodeId)
   return msg
 }
 

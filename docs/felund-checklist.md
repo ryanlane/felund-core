@@ -267,10 +267,10 @@ Track each item as `- [ ]` (pending), `- [x]` (done), or `- [-]` (skipped/deferr
 
 ### Verification
 
-- [ ] 1:1 audio call across NAT without TURN (when ICE direct succeeds)
-- [ ] 1:1 audio call falling back to TURN (symmetric NAT)
-- [ ] 1:1 video call at 480p; adapts resolution on bandwidth throttle
-- [ ] Mute/unmute does not drop connection
+- [x] 1:1 audio call across NAT without TURN (when ICE direct succeeds)
+- [x] 1:1 audio call falling back to TURN (symmetric NAT)
+- [x] 1:1 video call at 480p; adapts resolution on bandwidth throttle
+- [x] Mute/unmute does not drop connection
 
 ---
 
@@ -278,16 +278,37 @@ Track each item as `- [ ]` (pending), `- [x]` (done), or `- [-]` (skipped/deferr
 
 ### Step A — P2P fanout
 
-- [ ] Host creates N `RTCPeerConnection` instances (one per viewer)
-- [ ] Limit: enforce max N viewers (default 6; configurable)
-- [ ] Viewer connections are receive-only (no `addTrack` from viewer side)
-- [ ] Host UI: viewer count indicator, revoke button per viewer
-- [ ] Implement `call.revoke {session_id, target_node_id}` event → host closes that peer connection
+- [x] Host creates N `RTCPeerConnection` instances (one per viewer)
+  - `WebRTCCallManager.connectToViewer(viewerId)` — host always initiates offer regardless of nodeId ordering
+  - Called from the call manager `useEffect` for each `call.viewers` entry (capped at `MAX_BROADCAST_VIEWERS`)
+- [x] Limit: enforce max N viewers (default 6; configurable)
+  - `MAX_BROADCAST_VIEWERS = 6` constant in [call/types.ts](../chat-webclient/src/network/call/types.ts)
+  - Host connects only to `call.viewers.slice(0, MAX_BROADCAST_VIEWERS)` per effect cycle
+  - "Watch" button hidden in `CallModal` once the viewer cap is reached
+- [x] Viewer connections are receive-only (no `addTrack` from viewer side)
+  - `isViewer?: boolean` on `CallManagerConfig`; set when node is in `call.viewers`
+  - `handleSignal` skips `addTrack` on answerer side when `this.config.isViewer`
+  - Viewer's `CallManager` skips `startMedia()` entirely
+- [x] Host UI: viewer count indicator, revoke button per viewer
+  - Header: `call(Np+Mv)` format showing participant and viewer counts
+  - Call modal: separate viewers section with `✕` revoke button per viewer (host-only)
+  - Sidebar: `◉ Call (viewing)` when local node is a viewer
+- [x] Implement `call.revoke {session_id, target_node_id}` event → host closes that peer connection
+  - Python: `"revoke"` op in `CALL_OPS`; `apply_call_event` removes target from viewers/participants (host-only guard)
+  - Web: `applyControlEvents` handles `op: "revoke"`; `revokeViewer()` action in [state.ts](../chat-webclient/src/core/state.ts)
+
+### New: viewer join path
+
+- [x] `call.view` op added to Python `CALL_OPS` and `apply_call_event` (adds node to `call.viewers`)
+- [x] `watchCall(state, sessionId)` action in [state.ts](../chat-webclient/src/core/state.ts) — sends `op: "view"`, adds to local viewers
+- [x] `applyControlEvents` handles `op: "view"` — adds `nodeId` to `call.viewers`, transitions pending→active
+- [x] `/call view` slash command in `App.tsx`
+- [x] "Watch" button in `CallModal` not-in-call state (hidden when cap reached)
 
 ### Step B — Optional SFU-lite (deferred)
 
-- [ ] Evaluate need: only if P2P fanout proves unreliable at target viewer count
-- [ ] Document self-hosted SFU options (mediasoup, Janus) if proceeding
+- [-] Evaluate need: only if P2P fanout proves unreliable at target viewer count
+- [-] Document self-hosted SFU options (mediasoup, Janus) if proceeding
 
 ### Verification
 

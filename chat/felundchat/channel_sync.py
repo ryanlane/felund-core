@@ -329,8 +329,10 @@ CALL_OPS = {
     "create",
     "invite",
     "join",
+    "view",    # join as receive-only viewer (no media upload)
     "leave",
     "end",
+    "revoke",  # host removes a viewer
     "signal.offer",
     "signal.answer",
     "signal.candidate",
@@ -453,6 +455,27 @@ def apply_call_event(state: State, circle_id: str, event: Dict[str, Any]) -> boo
         call.call_state = "ended"
         state.active_calls.pop(session_id, None)
         return True
+
+    if op == "view":
+        node_id = str(event.get("node_id", actor_node_id)).strip()
+        if not node_id or node_id in call.viewers:
+            return False
+        call.viewers.add(node_id)
+        if call.call_state == "pending":
+            call.call_state = "active"
+        return True
+
+    if op == "revoke":
+        # Only the host may revoke.
+        if actor_node_id and actor_node_id != call.host_node_id:
+            return False
+        target_node_id = str(event.get("target_node_id", "")).strip()
+        if not target_node_id:
+            return False
+        changed = target_node_id in call.viewers or target_node_id in call.participants
+        call.viewers.discard(target_node_id)
+        call.participants.discard(target_node_id)
+        return changed
 
     if op == "invite":
         # Only the host may invite; no tracked state change.

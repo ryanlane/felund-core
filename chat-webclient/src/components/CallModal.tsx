@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import type { CallSession, State } from '../core/models'
-import { createCall, endCall, joinCall, leaveCall } from '../core/state'
+import { createCall, endCall, joinCall, leaveCall, revokeViewer, watchCall } from '../core/state'
 import type { CallPeerState } from '../network/call'
 import type { WebRTCCallManager } from '../network/call'
+import { MAX_BROADCAST_VIEWERS } from '../network/call'
 import { VUMeter } from './VUMeter'
 
 interface CallModalProps {
@@ -10,6 +11,7 @@ interface CallModalProps {
   onClose: () => void
   currentCircleId: string | undefined
   amInCall: boolean
+  amViewer: boolean
   amHost: boolean
   activeCall: CallSession | null
   callManagerRef: { current: WebRTCCallManager | null }
@@ -38,6 +40,7 @@ export function CallModal({
   onClose,
   currentCircleId,
   amInCall,
+  amViewer,
   amHost,
   activeCall,
   callManagerRef,
@@ -76,15 +79,16 @@ export function CallModal({
     <div className="tui-modal-overlay" onClick={onClose}>
       <div className="tui-modal tui-call-modal" onClick={(e) => e.stopPropagation()} data-testid="call-modal">
         <div className="tui-modal-header">
-          {amInCall ? '◈ Call' : '◇ Call'}
+          {amInCall ? '◈ Call' : amViewer ? '◉ Call (viewing)' : '◇ Call'}
           {activeCall && (
             <span style={{ fontWeight: 'normal', fontSize: '0.78rem', marginLeft: '0.6rem', opacity: 0.75 }}>
-              {activeCall.participants.length} participant{activeCall.participants.length !== 1 ? 's' : ''}
+              {activeCall.participants.length}p
+              {activeCall.viewers.length > 0 ? ` · ${activeCall.viewers.length}v` : ''}
             </span>
           )}
         </div>
         <div className="tui-modal-body">
-          {amInCall ? (
+          {amInCall || amViewer ? (
             <>
               {/* Video grid — shown when camera is on */}
               {isVideoOn && (
@@ -139,14 +143,53 @@ export function CallModal({
                       </div>
                     )
                   })}
+                  {activeCall.viewers.length > 0 && (
+                    <>
+                      <div className="tui-call-participant tui-dim" style={{ marginTop: '0.3rem', fontSize: '0.75rem' }}>
+                        viewers ({activeCall.viewers.length}/{MAX_BROADCAST_VIEWERS})
+                      </div>
+                      {activeCall.viewers.map((viewerId) => {
+                        const peerState = viewerId !== nodeId ? callPeerStates[viewerId] : undefined
+                        return (
+                          <div key={viewerId} className="tui-call-participant">
+                            {'◎ '}
+                            {viewerId.slice(0, 8)}
+                            {viewerId === nodeId ? ' (you)' : ''}
+                            {peerState && (
+                              <span className={`tui-peer-state ${peerState}`}>
+                                {peerState === 'connected' ? ' ○' : peerState === 'connecting' ? ' ◌' : ' ✕'}
+                              </span>
+                            )}
+                            {amHost && viewerId !== nodeId && (
+                              <button
+                                className="tui-btn tui-btn--inline"
+                                style={{ marginLeft: '0.4rem', fontSize: '0.7rem', padding: '0 0.3rem' }}
+                                onClick={() =>
+                                  void (async () => {
+                                    const next = { ...state, activeCalls: { ...state.activeCalls } }
+                                    await revokeViewer(next, activeCall.sessionId, viewerId)
+                                    await persist(next)
+                                  })()
+                                }
+                              >
+                                ✕
+                              </button>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </>
+                  )}
                 </div>
               )}
-              {/* VU meters */}
+              {/* VU meters — participants only (viewers have no local audio to meter) */}
               <div className="tui-vu-meters">
-                <div className="tui-vu-row">
-                  <span className="tui-vu-label">you</span>
-                  <VUMeter stream={callLocalStream} />
-                </div>
+                {amInCall && (
+                  <div className="tui-vu-row">
+                    <span className="tui-vu-label">you</span>
+                    <VUMeter stream={callLocalStream} />
+                  </div>
+                )}
                 {Object.entries(remoteStreams).map(([peerId, stream]) => (
                   <div key={peerId} className="tui-vu-row">
                     <span className="tui-vu-label">{peerId.slice(0, 6)}</span>
@@ -164,30 +207,34 @@ export function CallModal({
           )}
         </div>
         <div className="tui-modal-actions">
-          {amInCall ? (
+          {amInCall || amViewer ? (
             <>
-              <button
-                className={`tui-btn ${isMuted ? '' : 'primary'}`}
-                onClick={() => {
-                  const m = !isMuted
-                  setIsMuted(m)
-                  callManagerRef.current?.muteAudio(m)
-                }}
-                data-testid="call-mute"
-              >
-                {isMuted ? '⊗ Muted' : '◎ Mic'}
-              </button>
-              <button
-                className={`tui-btn ${isVideoOn ? 'primary' : ''}`}
-                onClick={() => {
-                  const v = !isVideoOn
-                  setIsVideoOn(v)
-                  void callManagerRef.current?.enableVideo(v)
-                }}
-                data-testid="call-cam"
-              >
-                {isVideoOn ? '⊡ Cam' : '⊞ Cam'}
-              </button>
+              {amInCall && (
+                <>
+                  <button
+                    className={`tui-btn ${isMuted ? '' : 'primary'}`}
+                    onClick={() => {
+                      const m = !isMuted
+                      setIsMuted(m)
+                      callManagerRef.current?.muteAudio(m)
+                    }}
+                    data-testid="call-mute"
+                  >
+                    {isMuted ? '⊗ Muted' : '◎ Mic'}
+                  </button>
+                  <button
+                    className={`tui-btn ${isVideoOn ? 'primary' : ''}`}
+                    onClick={() => {
+                      const v = !isVideoOn
+                      setIsVideoOn(v)
+                      void callManagerRef.current?.enableVideo(v)
+                    }}
+                    data-testid="call-cam"
+                  >
+                    {isVideoOn ? '⊡ Cam' : '⊞ Cam'}
+                  </button>
+                </>
+              )}
               <button
                 className="tui-btn"
                 onClick={() =>
@@ -200,7 +247,7 @@ export function CallModal({
                 }
                 data-testid="call-leave"
               >
-                Leave
+                {amViewer ? 'Stop watching' : 'Leave'}
               </button>
               {amHost && (
                 <button
@@ -218,13 +265,15 @@ export function CallModal({
                   End
                 </button>
               )}
-              <button
-                className={`tui-btn ${showDevices ? 'primary' : ''}`}
-                onClick={() => setShowDevices((v) => !v)}
-                data-testid="call-devices"
-              >
-                Devices
-              </button>
+              {amInCall && (
+                <button
+                  className={`tui-btn ${showDevices ? 'primary' : ''}`}
+                  onClick={() => setShowDevices((v) => !v)}
+                  data-testid="call-devices"
+                >
+                  Devices
+                </button>
+              )}
               <button className="tui-btn" onClick={onClose} data-testid="call-close">
                 Close
               </button>
@@ -246,19 +295,36 @@ export function CallModal({
                   Start call
                 </button>
               ) : (
-                <button
-                  className="tui-btn primary"
-                  onClick={() =>
-                    void (async () => {
-                      const next = { ...state, activeCalls: { ...state.activeCalls } }
-                      await joinCall(next, activeCall.sessionId)
-                      await persist(next)
-                    })()
-                  }
-                  data-testid="call-join"
-                >
-                  Join call
-                </button>
+                <>
+                  <button
+                    className="tui-btn primary"
+                    onClick={() =>
+                      void (async () => {
+                        const next = { ...state, activeCalls: { ...state.activeCalls } }
+                        await joinCall(next, activeCall.sessionId)
+                        await persist(next)
+                      })()
+                    }
+                    data-testid="call-join"
+                  >
+                    Join call
+                  </button>
+                  {activeCall.viewers.length < MAX_BROADCAST_VIEWERS && (
+                    <button
+                      className="tui-btn"
+                      onClick={() =>
+                        void (async () => {
+                          const next = { ...state, activeCalls: { ...state.activeCalls } }
+                          await watchCall(next, activeCall.sessionId)
+                          await persist(next)
+                        })()
+                      }
+                      data-testid="call-watch"
+                    >
+                      Watch
+                    </button>
+                  )}
+                </>
               )}
               <button className="tui-btn" onClick={onClose} data-testid="call-cancel">
                 Cancel
@@ -266,7 +332,7 @@ export function CallModal({
             </>
           )}
         </div>
-        {amInCall && showDevices && (
+        {amInCall && !amViewer && showDevices && (
           <div className="tui-call-devices">
             <label>
               Microphone

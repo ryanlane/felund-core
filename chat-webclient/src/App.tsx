@@ -18,6 +18,7 @@ import {
   saveState,
   sendMessage,
   visibleMessages,
+  watchCall,
 } from './core/state'
 import { sha256HexFromRawKey } from './core/crypto'
 import {
@@ -30,7 +31,7 @@ import {
 import { pushMessages, pullMessages, openRelayWS } from './network/relay'
 import type { WsStatus } from './network/relay'
 import { WebRTCTransport } from './network/transport'
-import { WebRTCCallManager } from './network/call'
+import { WebRTCCallManager, MAX_BROADCAST_VIEWERS } from './network/call'
 import type { CallPeerState } from './network/call'
 import {
   formatTime,
@@ -487,8 +488,9 @@ function App() {
         ) ?? null
       : null
     const isInCall = call?.participants.includes(s.node.nodeId) ?? false
+    const isViewer = call?.viewers.includes(s.node.nodeId) ?? false
 
-    if (!isInCall || !call) {
+    if ((!isInCall && !isViewer) || !call) {
       callManagerRef.current?.destroy()
       callManagerRef.current = null
       setRemoteStreams({})
@@ -523,6 +525,7 @@ function App() {
         circleId,
         rendezvousBase: base,
         iceServers,
+        isViewer,
         onRemoteStream: (peerId, stream) => {
           setRemoteStreams((prev) => ({ ...prev, [peerId]: stream }))
         },
@@ -538,20 +541,35 @@ function App() {
         },
       })
       callManagerRef.current = mgr
-      void (async () => {
-        const ok = await mgr.startMedia(isVideoOn)
-        if (!ok) {
-          setStatus('Microphone access failed — check permissions or input device.')
-        }
-        if (callManagerRef.current === mgr) setCallLocalStream(mgr.localStream)
-      })()
+      // Viewers are receive-only; they don't need to capture local audio/video.
+      if (!isViewer) {
+        void (async () => {
+          const ok = await mgr.startMedia(isVideoOn)
+          if (!ok) {
+            setStatus('Microphone access failed — check permissions or input device.')
+          }
+          if (callManagerRef.current === mgr) setCallLocalStream(mgr.localStream)
+        })()
+      }
     }
 
-    // Connect to any participant we haven't yet connected to
     const mgr = callManagerRef.current
-    const otherParticipants = call.participants.filter((id) => id !== s.node.nodeId)
-    for (const peerId of otherParticipants) {
-      void mgr.connectToPeer(peerId)
+    const isHost = call.hostNodeId === s.node.nodeId
+
+    // Participants connect bidirectionally to each other.
+    if (!isViewer) {
+      const otherParticipants = call.participants.filter((id) => id !== s.node.nodeId)
+      for (const peerId of otherParticipants) {
+        void mgr.connectToPeer(peerId)
+      }
+    }
+
+    // Host fans out to viewers (host always initiates; capped at MAX_BROADCAST_VIEWERS).
+    if (isHost) {
+      const viewersToConnect = call.viewers.slice(0, MAX_BROADCAST_VIEWERS)
+      for (const viewerId of viewersToConnect) {
+        void mgr.connectToViewer(viewerId)
+      }
     }
   }, [state]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -574,7 +592,9 @@ function App() {
           (c) => c.circleId === circleId && c.channelId === channelId,
         ) ?? null
       : null
-    const amInCall = activeCall?.participants.includes(s.node.nodeId) ?? false
+    const amInCall =
+      (activeCall?.participants.includes(s.node.nodeId) ??
+      activeCall?.viewers.includes(s.node.nodeId)) ?? false
     for (const transport of webrtcRef.current.values()) {
       transport.setSignalingEnabled(!amInCall)
     }
@@ -822,7 +842,20 @@ function App() {
         setStatus('Call ended.')
         return
       }
-      throw new Error('Usage: /call start|join|leave|end')
+      if (sub === 'view') {
+        const circleId = next.currentCircleId
+        if (!circleId) throw new Error('No active circle')
+        const channelId = next.currentChannelId ?? 'general'
+        const call = Object.values(next.activeCalls).find(
+          (c) => c.circleId === circleId && c.channelId === channelId,
+        )
+        if (!call) throw new Error('No active call in this channel')
+        const msg = await watchCall(next, call.sessionId)
+        if (!msg) throw new Error('Failed to join as viewer')
+        setStatus(`Watching call (${call.viewers.length} viewers)`)
+        return
+      }
+      throw new Error('Usage: /call start|join|view|leave|end')
     }
 
     throw new Error('Unknown command. Try /help')
@@ -922,6 +955,7 @@ function App() {
       ) ?? null
     : null
   const amInCall = activeCall?.participants.includes(state.node.nodeId) ?? false
+  const amViewer = activeCall?.viewers.includes(state.node.nodeId) ?? false
   const amHost = activeCall?.hostNodeId === state.node.nodeId
 
   const inviteCode = currentCircle
@@ -975,7 +1009,7 @@ function App() {
               <>
                 <span className="tui-header-sep"> │ </span>
                 <span className="tui-sync-status">
-                  {amInCall ? '◈' : '◇'} call({activeCall.participants.length})
+                  {amInCall ? '◈' : amViewer ? '◉' : '◇'} call({activeCall.participants.length}{activeCall.viewers.length > 0 ? `+${activeCall.viewers.length}v` : ''})
                 </span>
               </>
             )}
@@ -1033,7 +1067,7 @@ function App() {
                 className="tui-sidebar-section tui-sidebar-section-clickable"
                 onClick={() => setShowCall(true)}
               >
-                {activeCall ? (amInCall ? '◈ Call' : '◇ Call (pending)') : '◇ Call'}
+                {activeCall ? (amInCall ? '◈ Call' : amViewer ? '◉ Call (viewing)' : '◇ Call (pending)') : '◇ Call'}
               </div>
               {activeCall &&
                 activeCall.participants.map((nodeId) => {
@@ -1095,8 +1129,8 @@ function App() {
         </div>
       </div>
 
-      {/* Hidden audio elements for remote call streams */}
-      {amInCall &&
+      {/* Hidden audio elements for remote call streams (participants and viewers) */}
+      {(amInCall || amViewer) &&
         Object.entries(remoteStreams).map(([peerId, stream]) => (
           <audio
             key={peerId}
@@ -1154,7 +1188,7 @@ function App() {
         <button className={`tui-footer-btn${showSettings ? ' is-active' : ''}`} onClick={() => setShowSettings((v) => !v)}>
           <kbd>F3</kbd><span>Settings</span>
         </button>
-        <button className={`tui-footer-btn${amInCall || showCall ? ' is-active' : activeCall && !amInCall ? ' has-call' : ''}`} onClick={() => setShowCall((v) => !v)} data-testid="footer-call">
+        <button className={`tui-footer-btn${amInCall || amViewer || showCall ? ' is-active' : activeCall && !amInCall && !amViewer ? ' has-call' : ''}`} onClick={() => setShowCall((v) => !v)} data-testid="footer-call">
           <kbd>F4</kbd><span>Call</span>
         </button>
         <button className="tui-footer-btn" onClick={() => inputRef.current?.focus()}>
@@ -1199,6 +1233,7 @@ function App() {
         onClose={() => setShowCall(false)}
         currentCircleId={currentCircleId}
         amInCall={amInCall}
+        amViewer={amViewer}
         amHost={amHost}
         activeCall={activeCall}
         callManagerRef={callManagerRef}
