@@ -771,3 +771,13 @@ kbd {
   );
   border-radius: 3px;
 }
+
+/* ── Mobile: prevent iOS Safari auto-zoom on input focus ───────────────── */
+/* Safari zooms any input/textarea whose font-size < 16px when focused.    */
+@media (hover: none) and (pointer: coarse) {
+  .tui-input-form textarea,
+  .tui-modal-body input,
+  .tui-modal-body textarea {
+    font-size: 16px;
+  }
+}
