@@ -1,6 +1,6 @@
 import { openDB } from 'idb'
 
-import { deriveMessageKey, encryptMessageFields, randomHex, sha256Hex, sha256HexFromRawKey } from './crypto'
+import { decryptMessageFields, deriveMessageKey, encryptMessageFields, randomHex, sha256Hex, sha256HexFromRawKey } from './crypto'
 import type { AccessMode, CallSession, ChatMessage, Channel, Circle, State } from './models'
 import { nowTs } from './models'
 
@@ -59,13 +59,43 @@ export const loadState = async (): Promise<State> => {
       }
     },
   })
-  const state = await db.get(STORE_NAME, STATE_KEY)
-  return sanitizeLoadedState(state)
+  const raw = await db.get(STORE_NAME, STATE_KEY)
+  const state = sanitizeLoadedState(raw)
+  // Decrypt any messages stored with enc but empty text (storage-at-rest encryption).
+  await Promise.all(
+    Object.values(state.messages).map(async (msg) => {
+      if (!msg.enc || msg.text) return
+      const circle = state.circles[msg.circleId]
+      if (!circle) return
+      try {
+        const key = await deriveMessageKey(circle.secretHex)
+        const { displayName, text } = await decryptMessageFields(key, msg.enc, {
+          msgId: msg.msgId,
+          circleId: msg.circleId,
+          channelId: msg.channelId,
+          authorNodeId: msg.authorNodeId,
+          createdTs: msg.createdTs,
+        })
+        msg.displayName = displayName
+        msg.text = text
+      } catch {
+        // leave text='' — message renders blank rather than crashing
+      }
+    }),
+  )
+  return state
 }
 
 export const saveState = async (state: State): Promise<void> => {
   const db = await openDB(DB_NAME, 1)
-  await db.put(STORE_NAME, state, STATE_KEY)
+  // Strip plaintext from encrypted messages — store only the enc envelope on disk.
+  const messages = Object.fromEntries(
+    Object.entries(state.messages).map(([id, msg]) => [
+      id,
+      msg.enc ? { ...msg, text: '', displayName: '' } : msg,
+    ]),
+  )
+  await db.put(STORE_NAME, { ...state, messages }, STATE_KEY)
 }
 
 export const ensureGeneralChannel = (state: State, circleId: string): void => {

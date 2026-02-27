@@ -416,7 +416,7 @@ class GossipNode:
                     )
                     m.display_name = decrypted["display_name"]
                     m.text = decrypted["text"]
-                    m.enc = None  # store plaintext in memory; enc served its purpose
+                    # Keep m.enc so save_state can omit plaintext from the on-disk copy
                 except Exception:
                     continue  # reject on auth failure or malformed envelope
             elif not verify_message_mac(circle.secret_hex, m):

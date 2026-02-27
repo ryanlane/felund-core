@@ -25,13 +25,13 @@ rest, and remain backward compatible with legacy plaintext+MAC messages.
 | 4 — Relay push/pull/WS (Web) | `relay.ts` `toWire`/`fromWire` with legacy fallback | ✅ Done |
 | 4 — WebRTC DataChannel (Web) | `transport.ts` encrypts on send, decrypts on receive | ✅ Done |
 | 4 — Anchor exchange (Python) | `gossip._anchor_push_pull` uses `encrypt_message_fields` | ✅ Done |
-| 2 — Model enc field | `ChatMessage` in `models.py` / `models.ts` | ❌ Todo (Phase 1) |
-| 3 — Encrypt on write (Python) | `chat.py` message creation | ❌ Todo (Phase 1) |
-| 4 — TCP gossip dual-read | `gossip._merge_messages` | ❌ Todo (Phase 1) |
-| 5 — Control messages (Python) | `channel_sync.py` all `make_*_message` functions | ❌ Todo (Phase 2) |
-| 5 — Control messages (Web) | `state.ts` `makeCallEventMsg`, `renameCircle`, etc. | ❌ Todo (Phase 2) |
-| 2 — Storage at rest (Python) | `state.json` stores ciphertext, decrypt on render | ❌ Todo (Phase 3) |
-| 2 — Storage at rest (Web) | IndexedDB stores ciphertext, decrypt in `visibleMessages` | ❌ Todo (Phase 3) |
+| 2 — Model enc field | `ChatMessage` in `models.py` / `models.ts` | ✅ Done |
+| 3 — Encrypt on write (Python) | `chat.py` message creation | ✅ Done |
+| 4 — TCP gossip dual-read | `gossip._merge_messages` | ✅ Done |
+| 5 — Control messages (Python) | `channel_sync.py` all `make_*_message` functions | ✅ Done |
+| 5 — Control messages (Web) | `state.ts` `makeCallEventMsg`, `renameCircle`, etc. | ✅ Done |
+| 2 — Storage at rest (Python) | `state.json` stores ciphertext, decrypt on load | ✅ Done |
+| 2 — Storage at rest (Web) | IndexedDB stores ciphertext, decrypt on load | ✅ Done |
 
 ---
 
@@ -261,16 +261,24 @@ AES-256-GCM ciphertext. Decrypt lazily at render time.
 
 ## Verification checklist
 
-- [ ] Phase 1: Python TUI sends `enc`-carrying messages over TCP gossip.
-- [ ] Phase 1: A second Python node receiving via TCP decrypts and displays.
-- [ ] Phase 1: Legacy plaintext+MAC messages from old Python nodes still accepted.
-- [ ] Phase 1: Python ↔ Web relay exchange works (relay pull dual-read already done).
-- [ ] Phase 2: `__control` messages from Python carry `enc`; relay stores ciphertext.
-- [ ] Phase 2: `__control` messages from web carry `enc`; Python decrypts and applies.
-- [ ] Phase 2: Legacy control messages (no `enc`) still accepted and applied.
-- [ ] Phase 3: `state.json` contains no plaintext `text` after a session.
-- [ ] Phase 3: Restarting the Python TUI redisplays messages correctly (decrypt from enc).
-- [ ] Phase 3: Web IndexedDB contains no plaintext after a session.
+- [x] Phase 1: Python TUI sends `enc`-carrying messages over TCP gossip.
+- [x] Phase 1: A second Python node receiving via TCP decrypts and displays.
+- [x] Phase 1: Legacy plaintext+MAC messages from old Python nodes still accepted.
+- [x] Phase 1: Python ↔ Web relay exchange works (relay pull dual-read already done).
+- [x] Phase 2: `__control` messages from Python carry `enc`; relay stores ciphertext.
+- [x] Phase 2: `__control` messages from web carry `enc`; Python decrypts and applies.
+- [x] Phase 2: Legacy control messages (no `enc`) still accepted and applied.
+- [x] Phase 3: `state.json` contains no plaintext `text` after a session.
+- [x] Phase 3: Restarting the Python TUI redisplays messages correctly (decrypt from load).
+- [x] Phase 3: Web IndexedDB contains no plaintext after a session.
+
+### Remaining known gaps (future work)
+
+- Messages received from the relay (`fromWire` in `relay.ts` / `rendezvous_client`) are
+  decrypted on receive and stored without `enc`, so they remain in plaintext on disk.
+  Full at-rest coverage for relay messages requires re-encrypting into `enc` after
+  `fromWire` and before `saveState` / `save_state`.
+- Same applies to messages received via WebRTC DataChannel (`transport.ts` `fromWire`).
 
 ## Out of scope (for now)
 
