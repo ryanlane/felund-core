@@ -5,6 +5,7 @@ import json
 
 import felundchat.config as _cfg
 from felundchat.config import MESSAGE_MAX_AGE_S, MAX_MESSAGES_PER_CIRCLE
+from felundchat.crypto import decrypt_message_fields
 from felundchat.models import (
     AnchorRecord,
     ChatMessage,
@@ -117,8 +118,47 @@ def load_state() -> State:
     if not state.node.display_name:
         state.node.display_name = "anon"
     state.node_display_names[state.node.node_id] = state.node.display_name
+    _decrypt_loaded_messages(state)
     prune_messages(state)
     return state
+
+
+def _decrypt_loaded_messages(state: State) -> None:
+    """Decrypt any message that has an enc envelope but an empty text field.
+
+    This restores plaintext into memory for messages that were saved with
+    their content stripped (storage-at-rest encryption).  Failures are
+    silently skipped — the message is left with an empty text field.
+    """
+    for m in state.messages.values():
+        if m.enc is None or m.text:
+            continue  # nothing to decrypt (legacy or already has text)
+        circle = state.circles.get(m.circle_id)
+        if not circle:
+            continue
+        try:
+            decrypted = decrypt_message_fields(
+                circle.secret_hex, m.enc,
+                m.msg_id, m.circle_id, m.channel_id, m.author_node_id, m.created_ts,
+            )
+            m.display_name = decrypted["display_name"]
+            m.text = decrypted["text"]
+        except Exception:
+            pass  # leave text="" — message will render blank rather than crash
+
+
+def _serialize_message(m: ChatMessage) -> dict:
+    """Return a dict for JSON serialization.
+
+    For encrypted messages (enc is not None) the plaintext ``text`` and
+    ``display_name`` fields are replaced with empty strings so the on-disk
+    copy never contains readable message content.
+    """
+    d = dataclasses.asdict(m)
+    if d.get("enc") is not None:
+        d["text"] = ""
+        d["display_name"] = ""
+    return d
 
 
 def save_state(state: State) -> None:
@@ -129,7 +169,7 @@ def save_state(state: State) -> None:
         "circles": {cid: dataclasses.asdict(c) for cid, c in state.circles.items()},
         "peers": {pid: dataclasses.asdict(p) for pid, p in state.peers.items()},
         "circle_members": {cid: sorted(list(v)) for cid, v in state.circle_members.items()},
-        "messages": {mid: dataclasses.asdict(m) for mid, m in state.messages.items()},
+        "messages": {mid: _serialize_message(m) for mid, m in state.messages.items()},
         "channels": {
             cid: {channel_id: dataclasses.asdict(channel) for channel_id, channel in circle_channels.items()}
             for cid, circle_channels in state.channels.items()

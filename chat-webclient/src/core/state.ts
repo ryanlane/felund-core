@@ -1,6 +1,6 @@
 import { openDB } from 'idb'
 
-import { randomHex, sha256Hex, sha256HexFromRawKey } from './crypto'
+import { decryptMessageFields, deriveMessageKey, encryptMessageFields, randomHex, sha256Hex, sha256HexFromRawKey } from './crypto'
 import type { AccessMode, CallSession, ChatMessage, Channel, Circle, State } from './models'
 import { nowTs } from './models'
 
@@ -59,13 +59,43 @@ export const loadState = async (): Promise<State> => {
       }
     },
   })
-  const state = await db.get(STORE_NAME, STATE_KEY)
-  return sanitizeLoadedState(state)
+  const raw = await db.get(STORE_NAME, STATE_KEY)
+  const state = sanitizeLoadedState(raw)
+  // Decrypt any messages stored with enc but empty text (storage-at-rest encryption).
+  await Promise.all(
+    Object.values(state.messages).map(async (msg) => {
+      if (!msg.enc || msg.text) return
+      const circle = state.circles[msg.circleId]
+      if (!circle) return
+      try {
+        const key = await deriveMessageKey(circle.secretHex)
+        const { displayName, text } = await decryptMessageFields(key, msg.enc, {
+          msgId: msg.msgId,
+          circleId: msg.circleId,
+          channelId: msg.channelId,
+          authorNodeId: msg.authorNodeId,
+          createdTs: msg.createdTs,
+        })
+        msg.displayName = displayName
+        msg.text = text
+      } catch {
+        // leave text='' — message renders blank rather than crashing
+      }
+    }),
+  )
+  return state
 }
 
 export const saveState = async (state: State): Promise<void> => {
   const db = await openDB(DB_NAME, 1)
-  await db.put(STORE_NAME, state, STATE_KEY)
+  // Strip plaintext from encrypted messages — store only the enc envelope on disk.
+  const messages = Object.fromEntries(
+    Object.entries(state.messages).map(([id, msg]) => [
+      id,
+      msg.enc ? { ...msg, text: '', displayName: '' } : msg,
+    ]),
+  )
+  await db.put(STORE_NAME, { ...state, messages }, STATE_KEY)
 }
 
 export const ensureGeneralChannel = (state: State, circleId: string): void => {
@@ -130,6 +160,7 @@ export const renameCircle = async (state: State, circleId: string, name: string)
 
   const createdTs = nowTs()
   const msgId = (await sha256Hex(`${state.node.nodeId}|${createdTs}|${randomHex(8)}`)).slice(0, 32)
+  const text = JSON.stringify({ t: 'CIRCLE_NAME_EVT', name })
   const message: ChatMessage = {
     msgId,
     circleId,
@@ -137,8 +168,14 @@ export const renameCircle = async (state: State, circleId: string, name: string)
     authorNodeId: state.node.nodeId,
     displayName: state.node.displayName,
     createdTs,
-    text: JSON.stringify({ t: 'CIRCLE_NAME_EVT', name }),
+    text,
   }
+  const key = await deriveMessageKey(circle.secretHex)
+  message.enc = await encryptMessageFields(
+    key,
+    { msgId, circleId, channelId: CONTROL_CHANNEL_ID, authorNodeId: state.node.nodeId, createdTs },
+    { displayName: state.node.displayName, text },
+  )
   state.messages[message.msgId] = message
   circle.name = name
   return message
@@ -316,15 +353,26 @@ const makeCallEventMsg = async (
 ): Promise<ChatMessage> => {
   const createdTs = nowTs()
   const msgId = (await sha256Hex(`${state.node.nodeId}|${createdTs}|${randomHex(8)}`)).slice(0, 32)
-  return {
+  const text = JSON.stringify({ ...event, actor_node_id: state.node.nodeId })
+  const message: ChatMessage = {
     msgId,
     circleId,
     channelId: CONTROL_CHANNEL_ID,
     authorNodeId: state.node.nodeId,
     displayName: state.node.displayName,
     createdTs,
-    text: JSON.stringify({ ...event, actor_node_id: state.node.nodeId }),
+    text,
   }
+  const circle = state.circles[circleId]
+  if (circle) {
+    const key = await deriveMessageKey(circle.secretHex)
+    message.enc = await encryptMessageFields(
+      key,
+      { msgId, circleId, channelId: CONTROL_CHANNEL_ID, authorNodeId: state.node.nodeId, createdTs },
+      { displayName: state.node.displayName, text },
+    )
+  }
+  return message
 }
 
 /** Create a new call in the current channel and return the CALL_EVT message. */

@@ -1,3 +1,5 @@
+import type { EncPayload } from './crypto'
+
 export type AccessMode = 'public' | 'key' | 'invite'
 
 export interface NodeConfig {
@@ -29,6 +31,7 @@ export interface ChatMessage {
   createdTs: number
   text: string
   mac?: string
+  enc?: EncPayload
 }
 
 export type CallState = 'pending' | 'active' | 'ended'
