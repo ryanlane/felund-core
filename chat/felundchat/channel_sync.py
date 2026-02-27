@@ -4,7 +4,7 @@ import json
 import secrets
 from typing import Any, Dict, Optional
 
-from .crypto import make_message_mac, sha256_hex
+from .crypto import encrypt_message_fields, make_message_mac, sha256_hex
 from .models import CallSession, Channel, ChatMessage, State, now_ts
 
 
@@ -40,6 +40,8 @@ def make_channel_event_message(state: State, circle_id: str, event: Dict[str, An
         text=text,
     )
     msg.mac = make_message_mac(circle.secret_hex, msg)
+    msg.enc = encrypt_message_fields(circle.secret_hex, msg)
+    msg.schema_version = 2
     return msg
 
 
@@ -191,6 +193,8 @@ def make_circle_name_message(state: State, circle_id: str, name: str) -> Optiona
         text=text,
     )
     msg.mac = make_message_mac(circle.secret_hex, msg)
+    msg.enc = encrypt_message_fields(circle.secret_hex, msg)
+    msg.schema_version = 2
     return msg
 
 
@@ -259,6 +263,8 @@ def make_anchor_announce_message(state: State, circle_id: str) -> Optional[ChatM
         text=text,
     )
     msg.mac = make_message_mac(circle.secret_hex, msg)
+    msg.enc = encrypt_message_fields(circle.secret_hex, msg)
+    msg.schema_version = 2
     return msg
 
 
@@ -352,6 +358,8 @@ def make_call_event_message(state: State, circle_id: str, event: Dict[str, Any])
         text=text,
     )
     msg.mac = make_message_mac(circle.secret_hex, msg)
+    msg.enc = encrypt_message_fields(circle.secret_hex, msg)
+    msg.schema_version = 2
     return msg
 
 

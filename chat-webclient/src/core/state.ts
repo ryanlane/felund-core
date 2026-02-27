@@ -1,6 +1,6 @@
 import { openDB } from 'idb'
 
-import { randomHex, sha256Hex, sha256HexFromRawKey } from './crypto'
+import { deriveMessageKey, encryptMessageFields, randomHex, sha256Hex, sha256HexFromRawKey } from './crypto'
 import type { AccessMode, CallSession, ChatMessage, Channel, Circle, State } from './models'
 import { nowTs } from './models'
 
@@ -130,6 +130,7 @@ export const renameCircle = async (state: State, circleId: string, name: string)
 
   const createdTs = nowTs()
   const msgId = (await sha256Hex(`${state.node.nodeId}|${createdTs}|${randomHex(8)}`)).slice(0, 32)
+  const text = JSON.stringify({ t: 'CIRCLE_NAME_EVT', name })
   const message: ChatMessage = {
     msgId,
     circleId,
@@ -137,8 +138,14 @@ export const renameCircle = async (state: State, circleId: string, name: string)
     authorNodeId: state.node.nodeId,
     displayName: state.node.displayName,
     createdTs,
-    text: JSON.stringify({ t: 'CIRCLE_NAME_EVT', name }),
+    text,
   }
+  const key = await deriveMessageKey(circle.secretHex)
+  message.enc = await encryptMessageFields(
+    key,
+    { msgId, circleId, channelId: CONTROL_CHANNEL_ID, authorNodeId: state.node.nodeId, createdTs },
+    { displayName: state.node.displayName, text },
+  )
   state.messages[message.msgId] = message
   circle.name = name
   return message
@@ -316,15 +323,26 @@ const makeCallEventMsg = async (
 ): Promise<ChatMessage> => {
   const createdTs = nowTs()
   const msgId = (await sha256Hex(`${state.node.nodeId}|${createdTs}|${randomHex(8)}`)).slice(0, 32)
-  return {
+  const text = JSON.stringify({ ...event, actor_node_id: state.node.nodeId })
+  const message: ChatMessage = {
     msgId,
     circleId,
     channelId: CONTROL_CHANNEL_ID,
     authorNodeId: state.node.nodeId,
     displayName: state.node.displayName,
     createdTs,
-    text: JSON.stringify({ ...event, actor_node_id: state.node.nodeId }),
+    text,
   }
+  const circle = state.circles[circleId]
+  if (circle) {
+    const key = await deriveMessageKey(circle.secretHex)
+    message.enc = await encryptMessageFields(
+      key,
+      { msgId, circleId, channelId: CONTROL_CHANNEL_ID, authorNodeId: state.node.nodeId, createdTs },
+      { displayName: state.node.displayName, text },
+    )
+  }
+  return message
 }
 
 /** Create a new call in the current channel and return the CALL_EVT message. */
