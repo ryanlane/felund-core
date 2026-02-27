@@ -1,4 +1,4 @@
-﻿# felund E2EE plan (AES-256-GCM)
+# felund E2EE plan (AES-256-GCM)
 
 This document defines the end-to-end encryption (E2EE) plan for felund chat
 clients, using AES-256-GCM. The goal is to encrypt message content across all
@@ -11,6 +11,29 @@ rest, and remain backward compatible with legacy plaintext+MAC messages.
 - Store messages encrypted at rest (ciphertext in local state).
 - Dual-read legacy plaintext+MAC; encrypt new writes by default.
 - No key rotation in this phase; use the circle secret as the base key.
+
+---
+
+## Implementation status
+
+| Step | Component | Status |
+|------|-----------|--------|
+| 1 — Crypto helpers | Python `crypto.py` HKDF + AES-256-GCM + session key | ✅ Done |
+| 1 — Crypto helpers | Web `crypto.ts` HKDF + AES-256-GCM + session key | ✅ Done |
+| 4 — Relay push (Python) | `rendezvous_client.push_messages_to_relay` encrypts inline | ✅ Done |
+| 4 — Relay pull (Python) | `rendezvous_client.merge_relay_messages` dual-reads enc/MAC | ✅ Done |
+| 4 — Relay push/pull/WS (Web) | `relay.ts` `toWire`/`fromWire` with legacy fallback | ✅ Done |
+| 4 — WebRTC DataChannel (Web) | `transport.ts` encrypts on send, decrypts on receive | ✅ Done |
+| 4 — Anchor exchange (Python) | `gossip._anchor_push_pull` uses `encrypt_message_fields` | ✅ Done |
+| 2 — Model enc field | `ChatMessage` in `models.py` / `models.ts` | ❌ Todo (Phase 1) |
+| 3 — Encrypt on write (Python) | `chat.py` message creation | ❌ Todo (Phase 1) |
+| 4 — TCP gossip dual-read | `gossip._merge_messages` | ❌ Todo (Phase 1) |
+| 5 — Control messages (Python) | `channel_sync.py` all `make_*_message` functions | ❌ Todo (Phase 2) |
+| 5 — Control messages (Web) | `state.ts` `makeCallEventMsg`, `renameCircle`, etc. | ❌ Todo (Phase 2) |
+| 2 — Storage at rest (Python) | `state.json` stores ciphertext, decrypt on render | ❌ Todo (Phase 3) |
+| 2 — Storage at rest (Web) | IndexedDB stores ciphertext, decrypt in `visibleMessages` | ❌ Todo (Phase 3) |
+
+---
 
 ## Current state (high level)
 
@@ -49,46 +72,182 @@ occurs only when rendering in the UI or exporting messages.
 - Write encrypted messages by default.
 - Keep legacy MAC verification until the majority of clients migrate.
 
-## Implementation plan
+---
 
-1. **Align crypto helpers**
-	 - Ensure AES-GCM helpers and AAD fields are identical in:
-		 - Python: `chat/felundchat/crypto.py`
-		 - Web: `chat-webclient/src/core/crypto.ts`
-	 - Use consistent enc/nonce encoding and key derivation rules.
+## Phase 1 — Python TCP gossip encryption
 
-2. **Define encrypted message schema**
-	 - Update message models to include `enc`, `nonce`, `key_id`, `schema_version`.
-	 - Python: `chat/felundchat/models.py`
-	 - Web: `chat-webclient/src/core/models.ts`
+Scope: every message created by the Python TUI/CLI carries an `enc` field in
+addition to its MAC. The TCP gossip `MSGS_SEND` frame sends it transparently
+(via `dataclasses.asdict`). The receiving node decrypts if `enc` is present,
+falling back to MAC verification for legacy messages.
 
-3. **Encrypt on write**
-	 - Update message creation paths to write encrypted payloads by default:
-		 - Python TUI/CLI: `chat/felundchat/chat.py`
-		 - Web: `chat-webclient/src/core/state.ts`
-	 - Keep legacy MAC fields only for compatibility as needed.
+### 1.1  `chat/felundchat/models.py`
 
-4. **Dual-read transport paths**
-	 - TCP gossip: decrypt on merge, accept legacy MAC messages.
-	 - Relay push/pull: prefer encrypted envelopes, fall back to legacy.
-	 - WebRTC DataChannel: ensure encrypted envelope is the standard format.
-	 - Files:
-		 - `chat/felundchat/gossip.py`
-		 - `chat/felundchat/rendezvous_client.py`
-		 - `chat-webclient/src/network/relay.ts`
-		 - `chat-webclient/src/network/transport.ts`
+Add `enc: Optional[Dict[str, str]] = None` to `ChatMessage`.
+Add `Optional` to the existing `typing` import.
 
-5. **Control messages**
-	 - Encrypt control-channel (`__control`) events the same way as chat messages.
-	 - Update parsing paths to decrypt before applying events:
-		 - `chat/felundchat/channel_sync.py`
-		 - `chat-webclient/src/core/state.ts`
+```python
+from typing import Any, Dict, Optional, Set
 
-6. **Docs + threat model**
-	 - Update security notes to reflect E2EE behavior and legacy fallback:
-		 - `README.md`
-		 - `docs/felundchat-reference.md`
-		 - `docs/felund-review-plan.md`
+@dataclasses.dataclass
+class ChatMessage:
+    msg_id: str
+    circle_id: str
+    author_node_id: str
+    created_ts: int
+    text: str
+    channel_id: str = "general"
+    display_name: str = ""
+    mac: str = ""
+    schema_version: int = 1  # 1 = legacy plaintext+MAC, 2 = AES-256-GCM envelope
+    enc: Optional[Dict[str, str]] = None  # AES-256-GCM enc envelope; None = legacy
+```
+
+`enc` must be the last field (has a default) so existing positional
+`ChatMessage(...)` call sites keep working.
+
+### 1.2  `chat/felundchat/chat.py`
+
+Add `encrypt_message_fields` to the import from `felundchat.crypto`.
+
+In `interactive_chat`, after line `msg.mac = make_message_mac(circle.secret_hex, msg)`,
+add:
+
+```python
+msg.enc = encrypt_message_fields(circle.secret_hex, msg)
+msg.schema_version = 2
+```
+
+### 1.3  `chat/felundchat/gossip.py`
+
+Add `decrypt_message_fields` to the import from `felundchat.crypto`.
+
+In `_merge_messages`, replace the single `verify_message_mac` guard with
+dual-read logic (encrypted path first, legacy MAC fallback):
+
+```python
+if m.enc is not None:
+    # Encrypted path — decrypt and overwrite plaintext fields
+    try:
+        from cryptography.exceptions import InvalidTag  # local import
+        decrypted = decrypt_message_fields(
+            circle.secret_hex, m.enc,
+            m.msg_id, m.circle_id, m.channel_id, m.author_node_id, m.created_ts,
+        )
+        m.display_name = decrypted["display_name"]
+        m.text = decrypted["text"]
+        m.enc = None  # store plaintext in memory after decryption
+    except Exception:
+        continue  # reject on auth failure or malformed enc
+elif not verify_message_mac(circle.secret_hex, m):
+    continue  # reject legacy message with invalid MAC
+```
+
+After this block the rest of the `_merge_messages` loop is unchanged — it reads
+`m.text` to apply control events, which now holds the decrypted payload.
+
+---
+
+## Phase 2 — Control message encryption
+
+Scope: `__control` channel messages (CHANNEL_EVT, CIRCLE_NAME_EVT,
+ANCHOR_ANNOUNCE, CALL_EVT) carry an `enc` envelope. The relay and TCP peers
+see only ciphertext. Parsing is unchanged — after decryption `m.text` holds the
+event JSON.
+
+### 2.1  `chat/felundchat/channel_sync.py`
+
+Add `encrypt_message_fields` to the import from `.crypto`:
+
+```python
+from .crypto import encrypt_message_fields, make_message_mac, sha256_hex
+```
+
+In **all four** `make_*_message` functions
+(`make_channel_event_message`, `make_circle_name_message`,
+`make_anchor_announce_message`, `make_call_event_message`),
+add after `msg.mac = make_message_mac(...)`:
+
+```python
+msg.enc = encrypt_message_fields(circle.secret_hex, msg)
+msg.schema_version = 2
+```
+
+Note: `gossip._merge_messages` already handles both encrypted and legacy
+messages after the Phase 1 changes, so no further gossip changes are needed.
+Control event parsing (`parse_channel_event`, `parse_call_event`, etc.) operates
+on the already-decrypted `m.text` — no changes needed there.
+
+`chat.py`'s `watch_incoming` loop also reads `m.text` after messages are
+fetched from `state.messages` — decryption will have happened in
+`_merge_messages` at merge time, so no changes needed there either.
+
+### 2.2  `chat-webclient/src/core/models.ts`
+
+Add the `enc` field:
+
+```typescript
+import type { EncPayload } from './crypto'
+
+export interface ChatMessage {
+  msgId: string
+  circleId: string
+  channelId: string
+  authorNodeId: string
+  displayName: string
+  createdTs: number
+  text: string
+  mac?: string
+  enc?: EncPayload   // NEW
+}
+```
+
+### 2.3  `chat-webclient/src/core/state.ts`
+
+Import `deriveMessageKey` and `encryptMessageFields` from `../core/crypto`.
+
+In `makeCallEventMsg`, `renameCircle`, and the channel-create event path:
+1. Derive the circle key once: `const key = await deriveMessageKey(circle.secretHex)`.
+2. Build `clearFields` from the message header fields.
+3. Set `message.enc = await encryptMessageFields(key, clearFields, { displayName, text })`.
+
+`applyControlEvents` receives messages whose `text` has already been decrypted
+by `fromWire` (relay or WebRTC path). Local messages (created in the same session)
+are applied immediately by the action helper and do not re-enter
+`applyControlEvents`. No changes needed to `applyControlEvents` itself.
+
+---
+
+## Phase 3 — Storage at rest
+
+Scope: replace plaintext `text` / `display_name` in persisted state with the
+AES-256-GCM ciphertext. Decrypt lazily at render time.
+
+### Python
+
+- `ChatMessage` stores only `enc` (not `text` / `display_name`) after merge.
+  The fields remain in the dataclass for in-memory use during a session but
+  are cleared before serialisation.
+- `persistence.py` `save_state`: clear `m.text` and `m.display_name` before
+  writing; keep `m.enc`.
+- `persistence.py` `load_state`: after loading, populate a separate in-memory
+  cache of decrypted text per `msg_id` (avoids re-decrypting on every render).
+- `chat.py` `render_message`: use the decrypted-text cache; fall back to
+  `m.text` if the message was received plaintext (legacy).
+- TUI panels read from the same cache.
+
+### Web
+
+- `ChatMessage` in state may carry `enc` without `text` / `displayName`.
+- `state.ts` `visibleMessages`: make async; call `decryptMessageFields` for
+  messages that have `enc` but no `text`.
+- Cache decrypted text in a module-level `WeakMap<ChatMessage, string>` to
+  avoid re-decrypting every render cycle.
+- `sanitizeLoadedState`: preserve `enc` field on loaded messages.
+- Migration: existing plaintext messages in IndexedDB remain readable
+  (they have `text` but no `enc`).
+
+---
 
 ## Best practices
 
@@ -98,13 +257,20 @@ occurs only when rendering in the UI or exporting messages.
 - Treat circle secrets as long-term symmetric keys; do not log them.
 - Keep transport-level encryption as defense-in-depth (not a replacement).
 
+---
+
 ## Verification checklist
 
-- Python TUI and web client can exchange encrypted messages via relay.
-- TCP gossip between Python nodes still syncs with encrypted payloads.
-- WebRTC DataChannel continues to deliver encrypted messages.
-- Legacy plaintext messages are still accepted and displayed.
-- Stored state contains ciphertext (no plaintext in local storage).
+- [ ] Phase 1: Python TUI sends `enc`-carrying messages over TCP gossip.
+- [ ] Phase 1: A second Python node receiving via TCP decrypts and displays.
+- [ ] Phase 1: Legacy plaintext+MAC messages from old Python nodes still accepted.
+- [ ] Phase 1: Python ↔ Web relay exchange works (relay pull dual-read already done).
+- [ ] Phase 2: `__control` messages from Python carry `enc`; relay stores ciphertext.
+- [ ] Phase 2: `__control` messages from web carry `enc`; Python decrypts and applies.
+- [ ] Phase 2: Legacy control messages (no `enc`) still accepted and applied.
+- [ ] Phase 3: `state.json` contains no plaintext `text` after a session.
+- [ ] Phase 3: Restarting the Python TUI redisplays messages correctly (decrypt from enc).
+- [ ] Phase 3: Web IndexedDB contains no plaintext after a session.
 
 ## Out of scope (for now)
 
