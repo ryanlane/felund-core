@@ -11,6 +11,7 @@ from felundchat.anchor import (
     store_anchor_envelope,
 )
 from felundchat.crypto import (
+    decrypt_message_fields,
     derive_session_key,
     encrypt_message_fields,
     make_token,
@@ -405,8 +406,21 @@ class GossipNode:
                 continue
             if m.circle_id != circle_id:
                 continue
-            if not verify_message_mac(circle.secret_hex, m):
-                continue
+            if m.enc is not None:
+                # Encrypted path — decrypt display_name + text from the enc envelope
+                try:
+                    from cryptography.exceptions import InvalidTag  # noqa: F401 (used by AESGCM)
+                    decrypted = decrypt_message_fields(
+                        circle.secret_hex, m.enc,
+                        m.msg_id, m.circle_id, m.channel_id, m.author_node_id, m.created_ts,
+                    )
+                    m.display_name = decrypted["display_name"]
+                    m.text = decrypted["text"]
+                    m.enc = None  # store plaintext in memory; enc served its purpose
+                except Exception:
+                    continue  # reject on auth failure or malformed envelope
+            elif not verify_message_mac(circle.secret_hex, m):
+                continue  # reject legacy message with invalid MAC
             if m.msg_id not in self.state.messages:
                 self.state.messages[m.msg_id] = m
                 if m.display_name:

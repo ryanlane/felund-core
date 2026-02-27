@@ -15,7 +15,7 @@ from felundchat.channel_sync import (
     parse_channel_event,
     parse_circle_name_event,
 )
-from felundchat.crypto import make_message_mac, sha256_hex
+from felundchat.crypto import encrypt_message_fields, make_message_mac, sha256_hex
 from felundchat.gossip import GossipNode
 from felundchat.invite import is_relay_url, make_felund_code, parse_felund_code
 from felundchat.models import Channel, ChatMessage, Circle, State, now_ts
@@ -691,6 +691,8 @@ async def interactive_chat(
                 print("Selected circle no longer exists.")
                 continue
             msg.mac = make_message_mac(circle.secret_hex, msg)
+            msg.enc = encrypt_message_fields(circle.secret_hex, msg)
+            msg.schema_version = 2
             async with node._lock:
                 state.messages[msg_id] = msg
                 state.node_display_names[state.node.node_id] = state.node.display_name
