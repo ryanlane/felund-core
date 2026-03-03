@@ -220,10 +220,10 @@ function App() {
     const lastRegisteredAt: Record<string, number> = {}
     const REGISTER_INTERVAL_MS = 60_000
 
-    const unregisterAll = async (s: { node: { nodeId: string }; circles: Record<string, unknown> }) => {
-      for (const circleId of Object.keys(s.circles)) {
+    const unregisterAll = async (s: { node: { nodeId: string }; circles: Record<string, { secretHex: string }> }) => {
+      for (const [circleId, circle] of Object.entries(s.circles)) {
         try {
-          await unregisterPresence(base, { nodeId: s.node.nodeId, circleId })
+          await unregisterPresence(base, { nodeId: s.node.nodeId, circleId, circleSecretHex: circle.secretHex })
         } catch {
           /* best-effort */
         }
@@ -240,7 +240,8 @@ function App() {
       for (const circleId of Object.keys(s.circles)) {
         if (!lastRegisteredAt[circleId] || now - lastRegisteredAt[circleId] > REGISTER_INTERVAL_MS) {
           try {
-            await registerPresence(base, { nodeId: s.node.nodeId, circleId, ttlS: 120 })
+            const circleSecret = s.circles[circleId]?.secretHex
+            await registerPresence(base, { nodeId: s.node.nodeId, circleId, ttlS: 120, circleSecretHex: circleSecret })
             lastRegisteredAt[circleId] = now
           } catch {
             /* non-fatal */
@@ -318,7 +319,8 @@ function App() {
       const s2 = stateRef.current
       if (s2?.currentCircleId && !stopped) {
         try {
-          const peers = await lookupPeers(base, s2.node.nodeId, s2.currentCircleId, 50)
+          const circleSecret = s2.circles[s2.currentCircleId]?.secretHex
+          const peers = await lookupPeers(base, s2.node.nodeId, s2.currentCircleId, 50, circleSecret)
           if (!stopped) setPeerCount(peers.length)
           // Attempt direct WebRTC DataChannel connections to discovered peers.
           const transport = webrtcRef.current.get(s2.currentCircleId)

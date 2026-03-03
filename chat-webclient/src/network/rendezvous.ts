@@ -1,4 +1,4 @@
-import { sha256Hex } from '../core/crypto'
+import { hmacHex, sha256Hex } from '../core/crypto'
 
 export interface RendezvousHealth {
   ok: boolean
@@ -39,6 +39,60 @@ const circleHint = async (circleId: string): Promise<string> => {
   return digest.slice(0, 16)
 }
 
+// ── Request signing ───────────────────────────────────────────────────────────
+
+/**
+ * Derive the API signing key: HMAC-SHA256(circle_secret_bytes, "api-v1").
+ *
+ * The signing key is a one-way transform of the circle secret. It is safe to
+ * send to the server during registration — the circle secret itself is never
+ * transmitted.
+ */
+const signingKeyHex = async (circleSecretHex: string): Promise<string> =>
+  hmacHex(circleSecretHex, 'api-v1')
+
+/**
+ * Return a hex HMAC-SHA256 signature for a canonical API request.
+ *
+ * Canonical string: METHOD + path + sha256(bodyStr) + ts + nonce
+ * Signing key:      HMAC-SHA256(circle_secret_bytes, "api-v1")
+ */
+const signRequest = async (
+  circleSecretHex: string,
+  method: string,
+  path: string,
+  bodyStr: string,
+  ts: number,
+  nonce: string,
+): Promise<string> => {
+  const key = await signingKeyHex(circleSecretHex)
+  const bodyHash = await sha256Hex(bodyStr)
+  const canonical = `${method.toUpperCase()}${path}${bodyHash}${ts}${nonce}`
+  return hmacHex(key, canonical)
+}
+
+const buildAuthHeaders = async (
+  circleSecretHex: string,
+  nodeId: string,
+  method: string,
+  path: string,
+  bodyStr: string,
+): Promise<Record<string, string>> => {
+  const ts = Math.floor(Date.now() / 1000)
+  const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+  const sig = await signRequest(circleSecretHex, method, path, bodyStr, ts, nonce)
+  return {
+    'X-Felund-Node': nodeId,
+    'X-Felund-Ts': String(ts),
+    'X-Felund-Nonce': nonce,
+    'X-Felund-Signature': sig,
+  }
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
 export const healthCheck = async (base: string): Promise<RendezvousHealth> => {
   const url = withV1(base, 'health')
   const response = await fetch(url)
@@ -53,16 +107,18 @@ export const lookupPeers = async (
   nodeId: string,
   circleId: string,
   limit = 20,
+  circleSecretHex = '',
 ): Promise<RendezvousPeer[]> => {
   const hint = await circleHint(circleId)
   const query = new URLSearchParams({ circle_hint: hint, limit: String(limit) })
   const url = `${withV1(base, 'peers')}?${query.toString()}`
 
-  const response = await fetch(url, {
-    headers: {
-      'X-Felund-Node': nodeId,
-    },
-  })
+  const baseHeaders: Record<string, string> = { 'X-Felund-Node': nodeId }
+  const authHeaders = circleSecretHex
+    ? await buildAuthHeaders(circleSecretHex, nodeId, 'GET', '/peers', '')
+    : baseHeaders
+
+  const response = await fetch(url, { headers: authHeaders })
   if (!response.ok) {
     throw new Error(`Peer lookup failed (${response.status})`)
   }
@@ -86,22 +142,40 @@ const defaultEndpoint = () => {
 
 export const registerPresence = async (
   base: string,
-  input: { nodeId: string; circleId: string; ttlS?: number },
+  input: { nodeId: string; circleId: string; ttlS?: number; circleSecretHex?: string },
 ): Promise<void> => {
   const hint = await circleHint(input.circleId)
+  const body: Record<string, unknown> = {
+    node_id: input.nodeId,
+    circle_hint: hint,
+    endpoints: [defaultEndpoint()],
+    capabilities: { relay: false, transport: ['ws'], can_anchor: false },
+    ttl_s: input.ttlS ?? 120,
+  }
+
+  let authHeaders: Record<string, string> = {
+    'content-type': 'application/json',
+    'X-Felund-Node': input.nodeId,
+  }
+
+  if (input.circleSecretHex) {
+    // Include the signing key so the server can store and verify future requests.
+    body.signing_key = await signingKeyHex(input.circleSecretHex)
+    const bodyStr = JSON.stringify(body)
+    const signed = await buildAuthHeaders(
+      input.circleSecretHex,
+      input.nodeId,
+      'POST',
+      '/register',
+      bodyStr,
+    )
+    authHeaders = { 'content-type': 'application/json', ...signed }
+  }
+
   const response = await fetch(withV1(base, 'register'), {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'X-Felund-Node': input.nodeId,
-    },
-    body: JSON.stringify({
-      node_id: input.nodeId,
-      circle_hint: hint,
-      endpoints: [defaultEndpoint()],
-      capabilities: { relay: false, transport: ['ws'], can_anchor: false },
-      ttl_s: input.ttlS ?? 120,
-    }),
+    headers: authHeaders,
+    body: JSON.stringify(body),
   })
 
   if (!response.ok) {
@@ -111,19 +185,33 @@ export const registerPresence = async (
 
 export const unregisterPresence = async (
   base: string,
-  input: { nodeId: string; circleId: string },
+  input: { nodeId: string; circleId: string; circleSecretHex?: string },
 ): Promise<void> => {
   const hint = await circleHint(input.circleId)
+  const body = {
+    node_id: input.nodeId,
+    circle_hint: hint,
+  }
+
+  let authHeaders: Record<string, string> = { 'content-type': 'application/json' }
+
+  if (input.circleSecretHex) {
+    const bodyStr = JSON.stringify(body)
+    const signed = await buildAuthHeaders(
+      input.circleSecretHex,
+      input.nodeId,
+      'DELETE',
+      '/register',
+      bodyStr,
+    )
+    authHeaders = { 'content-type': 'application/json', ...signed }
+  }
+
   const response = await fetch(withV1(base, 'register'), {
     method: 'DELETE',
-    headers: {
-      'content-type': 'application/json',
-    },
+    headers: authHeaders,
     keepalive: true,
-    body: JSON.stringify({
-      node_id: input.nodeId,
-      circle_hint: hint,
-    }),
+    body: JSON.stringify(body),
   })
   if (!response.ok) {
     throw new Error(`Unregister failed (${response.status})`)

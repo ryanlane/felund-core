@@ -30,6 +30,7 @@ const VERSION            = '0.1.0';
 const DB_PATH_DEFAULT    = __DIR__ . '/data/felund_rendezvous.sqlite';
 const MAX_ENDPOINTS      = 16;
 const MAX_LIMIT          = 200;
+const NONCE_TTL_S        = 300;   // 5-minute replay-protection window
 
 /**
  * Load key=value pairs from api/php/.env into $_ENV / putenv().
@@ -133,10 +134,24 @@ function db_connect_sqlite(): PDO
         capabilities TEXT    NOT NULL DEFAULT "{}",
         observed_at  INTEGER NOT NULL,
         expires_at   INTEGER NOT NULL,
+        signing_key  TEXT    NOT NULL DEFAULT "",
         PRIMARY KEY (circle_hint, node_id)
     )');
+    // Migration: add signing_key to pre-existing databases.
+    try {
+        $pdo->exec('ALTER TABLE presence ADD COLUMN signing_key TEXT NOT NULL DEFAULT ""');
+    } catch (\PDOException) {
+        // Column already exists — nothing to do.
+    }
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_circle  ON presence (circle_hint)');
     $pdo->exec('CREATE INDEX IF NOT EXISTS idx_expires ON presence (expires_at)');
+
+    // Nonce store: prevents replay of signed requests within the 5-minute window.
+    $pdo->exec('CREATE TABLE IF NOT EXISTS nonces (
+        nonce TEXT    NOT NULL PRIMARY KEY,
+        ts    INTEGER NOT NULL
+    )');
+    $pdo->exec('CREATE INDEX IF NOT EXISTS idx_nonces_ts ON nonces (ts)');
 
     // Relay: shared message store for clients that cannot open direct TCP
     // connections (e.g. browsers).  Messages are HMAC-verified by clients;
@@ -192,9 +207,12 @@ function db_prune(PDO $db, int $now): void
 {
     $db->exec("DELETE FROM presence       WHERE expires_at <= $now");
     $db->exec("DELETE FROM relay_messages WHERE expires_at <= $now");
+    $db->exec('DELETE FROM nonces WHERE ts < ' . ($now - NONCE_TTL_S));
 }
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
+
+const CORS_ALLOW_HEADERS = 'Content-Type, X-Felund-Node, X-Felund-Ts, X-Felund-Nonce, X-Felund-Signature';
 
 function json_response(mixed $data, int $status = 200): never
 {
@@ -203,7 +221,7 @@ function json_response(mixed $data, int $status = 200): never
     // Allow cross-origin requests so web-based clients can reach the API
     header('Access-Control-Allow-Origin: *');
     header('Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS');
-    header('Access-Control-Allow-Headers: Content-Type, X-Felund-Node');
+    header('Access-Control-Allow-Headers: ' . CORS_ALLOW_HEADERS);
     echo json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     exit;
 }
@@ -215,9 +233,19 @@ function http_error(string $message, int $status = 400): never
 
 // ── Input validation helpers ──────────────────────────────────────────────────
 
+/** Read php://input exactly once; subsequent calls return the cached value. */
+function raw_body(): string
+{
+    static $body = null;
+    if ($body === null) {
+        $body = (string) file_get_contents('php://input');
+    }
+    return $body;
+}
+
 function json_body(): array
 {
-    $raw = (string) file_get_contents('php://input');
+    $raw = raw_body();
     if ($raw === '') {
         return [];
     }
@@ -226,6 +254,83 @@ function json_body(): array
         http_error('Request body must be a JSON object');
     }
     return $data;
+}
+
+// ── Request signing ───────────────────────────────────────────────────────────
+
+/**
+ * Look up the stored signing key for a (circle_hint, node_id) pair.
+ * Returns null if the node has not registered or its key is empty.
+ */
+function lookup_signing_key(string $circle_hint, string $node_id): ?string
+{
+    $stmt = db()->prepare(
+        'SELECT signing_key FROM presence WHERE circle_hint = :ch AND node_id = :nid LIMIT 1'
+    );
+    $stmt->execute([':ch' => $circle_hint, ':nid' => $node_id]);
+    $row = $stmt->fetch();
+    if ($row === false || $row['signing_key'] === '') {
+        return null;
+    }
+    return $row['signing_key'];
+}
+
+/**
+ * Enforce request authentication.
+ *
+ * Reads X-Felund-Ts / X-Felund-Nonce / X-Felund-Signature from the current
+ * request, verifies the timestamp window (±300 s), checks the nonce has not
+ * been replayed, and verifies the HMAC-SHA256 signature.
+ *
+ * @param string|null $signing_key_hex  Stored signing key (hex).  Pass null if
+ *                                      not found — will always return 401.
+ */
+function enforce_request_auth(?string $signing_key_hex): void
+{
+    $ts_str = $_SERVER['HTTP_X_FELUND_TS']        ?? '';
+    $nonce  = $_SERVER['HTTP_X_FELUND_NONCE']     ?? '';
+    $sig    = $_SERVER['HTTP_X_FELUND_SIGNATURE'] ?? '';
+
+    if ($ts_str === '' || $nonce === '' || $sig === '') {
+        json_response(['ok' => false, 'code' => 'INVALID_SIGNATURE'], 401);
+    }
+
+    $ts  = (int) $ts_str;
+    $now = time();
+
+    if (abs($now - $ts) > NONCE_TTL_S) {
+        json_response(['ok' => false, 'code' => 'EXPIRED_TIMESTAMP'], 400);
+    }
+
+    $db = db();
+    // Prune expired nonces, then check for replay.
+    $db->prepare('DELETE FROM nonces WHERE ts < :cutoff')
+       ->execute([':cutoff' => $now - NONCE_TTL_S]);
+    $check = $db->prepare('SELECT 1 FROM nonces WHERE nonce = :n LIMIT 1');
+    $check->execute([':n' => $nonce]);
+    if ($check->fetch()) {
+        json_response(['ok' => false, 'code' => 'NONCE_REPLAY'], 409);
+    }
+
+    if ($signing_key_hex === null) {
+        json_response(['ok' => false, 'code' => 'INVALID_SIGNATURE'], 401);
+    }
+
+    // Build canonical string — same normalisation the router uses.
+    $method     = $_SERVER['REQUEST_METHOD'];
+    $path       = '/' . ltrim(preg_replace('#^.*/v1#', '', rtrim(parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?? '/', '/')), '/');
+    $body_hash  = hash('sha256', raw_body());
+    $canonical  = strtoupper($method) . $path . $body_hash . $ts . $nonce;
+    $key        = hex2bin($signing_key_hex);
+    $expected   = hash_hmac('sha256', $canonical, $key);
+
+    if (!hash_equals($expected, strtolower($sig))) {
+        json_response(['ok' => false, 'code' => 'INVALID_SIGNATURE'], 401);
+    }
+
+    // Commit nonce to prevent replay.
+    $db->prepare('INSERT OR IGNORE INTO nonces (nonce, ts) VALUES (:n, :ts)')
+       ->execute([':n' => $nonce, ':ts' => $ts]);
 }
 
 function require_str(array $data, string $key, int $min = 1, int $max = 255): string
@@ -320,6 +425,20 @@ function route_register(): never
     $endpoints   = validate_endpoints($data);
     $caps        = validate_capabilities($data);
 
+    // Extract and validate the signing key supplied by the client.
+    // On first registration the server has no stored key, so we verify using
+    // the key from the request body (self-authenticated bootstrap).  Subsequent
+    // registrations re-send the same key as a heartbeat.
+    $signing_key = '';
+    if (isset($data['signing_key'])) {
+        $raw_key = $data['signing_key'];
+        if (!is_string($raw_key) || !preg_match('/^[0-9a-f]{64}$/i', $raw_key)) {
+            http_error("Field 'signing_key' must be a 64-char hex string");
+        }
+        $signing_key = strtolower($raw_key);
+        enforce_request_auth($signing_key);
+    }
+
     $now        = time();
     $expires_at = $now + $ttl_s;
 
@@ -328,8 +447,8 @@ function route_register(): never
 
     $stmt = $db->prepare(
         sql_upsert('presence') . '
-         (circle_hint, node_id, endpoints, capabilities, observed_at, expires_at)
-         VALUES (:ch, :nid, :ep, :caps, :obs, :exp)'
+         (circle_hint, node_id, endpoints, capabilities, observed_at, expires_at, signing_key)
+         VALUES (:ch, :nid, :ep, :caps, :obs, :exp, :sk)'
     );
     $stmt->execute([
         ':ch'   => $circle_hint,
@@ -338,6 +457,7 @@ function route_register(): never
         ':caps' => json_encode($caps),
         ':obs'  => $now,
         ':exp'  => $expires_at,
+        ':sk'   => $signing_key,
     ]);
 
     // Best-effort observed host (behind a proxy, X-Forwarded-For takes priority).
@@ -378,6 +498,7 @@ function route_peers(): never
     $limit = max(1, min($limit, MAX_LIMIT));
 
     $exclude_node = $_SERVER['HTTP_X_FELUND_NODE'] ?? null;
+    enforce_request_auth($exclude_node ? lookup_signing_key($circle_hint, $exclude_node) : null);
 
     $now = time();
     $db  = db();
@@ -422,6 +543,8 @@ function route_unregister(): never
     $node_id     = require_str($data, 'node_id',     8, 128);
     $circle_hint = require_str($data, 'circle_hint', 8, 128);
 
+    enforce_request_auth(lookup_signing_key($circle_hint, $node_id));
+
     $stmt = db()->prepare(
         'DELETE FROM presence WHERE circle_hint = :ch AND node_id = :nid'
     );
@@ -434,7 +557,11 @@ function route_messages_post(): never
 {
     $data        = json_body();
     $circle_hint = require_str($data, 'circle_hint', 8, 128);
-    $msgs        = $data['messages'] ?? [];
+
+    $node_id = $_SERVER['HTTP_X_FELUND_NODE'] ?? '';
+    enforce_request_auth($node_id !== '' ? lookup_signing_key($circle_hint, $node_id) : null);
+
+    $msgs = $data['messages'] ?? [];
     if (!is_array($msgs)) {
         http_error("'messages' must be an array");
     }
@@ -492,6 +619,9 @@ function route_messages_get(): never
         http_error("Query param 'circle_hint' is required (8–128 chars)");
     }
 
+    $node_id = $_SERVER['HTTP_X_FELUND_NODE'] ?? '';
+    enforce_request_auth($node_id !== '' ? lookup_signing_key($circle_hint, $node_id) : null);
+
     $since = (int) ($_GET['since'] ?? 0);
     $limit = (int) ($_GET['limit'] ?? 200);
     $limit = max(1, min($limit, 500));
@@ -526,7 +656,7 @@ function route_messages_get(): never
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     header('Access-Control-Allow-Origin: *');
     header('Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS');
-    header('Access-Control-Allow-Headers: Content-Type, X-Felund-Node');
+    header('Access-Control-Allow-Headers: ' . CORS_ALLOW_HEADERS);
     http_response_code(204);
     exit;
 }

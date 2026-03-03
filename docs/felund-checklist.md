@@ -322,22 +322,23 @@ Track each item as `- [ ]` (pending), `- [x]` (done), or `- [-]` (skipped/deferr
 
 ### Signing implementation
 
-- [ ] Add `sign_request(circle_secret, method, path, body, ts, nonce) -> str` to [chat/felundchat/rendezvous_client.py](../chat/felundchat/rendezvous_client.py)
+- [x] Add `sign_request(circle_secret, method, path, body, ts, nonce) -> str` to [chat/felundchat/rendezvous_client.py](../chat/felundchat/rendezvous_client.py)
   - Signing key: `HMAC-SHA256(circle_secret_bytes, b"api-v1")`
   - Canonical: `method.upper() + path + sha256(body) + str(ts) + nonce`
   - Signature: `HMAC-SHA256(signing_key, canonical.encode())`
-- [ ] Add `signRequest(circleSecret, method, path, body, ts, nonce)` to [chat-webclient/src/network/rendezvous.ts](../chat-webclient/src/network/rendezvous.ts)
-- [ ] Attach headers on all outbound API calls: `X-Felund-Node`, `X-Felund-Ts`, `X-Felund-Nonce`, `X-Felund-Signature`
+- [x] Add `signRequest(circleSecret, method, path, body, ts, nonce)` to [chat-webclient/src/network/rendezvous.ts](../chat-webclient/src/network/rendezvous.ts)
+- [x] Attach headers on all outbound API calls: `X-Felund-Node`, `X-Felund-Ts`, `X-Felund-Nonce`, `X-Felund-Signature`
+- [x] Client sends `signing_key = HMAC(circle_secret, "api-v1")` in `POST /v1/register` body; server stores it per `(circle_hint, node_id)` for verifying subsequent requests
 
 ### Server enforcement
 
-- [ ] Add signature verification to [api/php/rendezvous.php](../api/php/rendezvous.php)
-  - Derive signing key from `circle_hint` is NOT sufficient — signature requires the circle secret on the client; server verifies by re-deriving from stored data... **Note:** server doesn't have the secret. Use token-based verification instead: client sends `X-Felund-Auth-Token = HMAC(circle_secret, canonical)`, server can't verify the secret directly but can enforce nonce/timestamp to prevent replays. Revisit verification model.
-- [ ] Add nonce deduplication cache (5-minute TTL, `nonce → ts` map in SQLite/memory)
-- [ ] Enforce timestamp window: reject requests where `|server_time - X-Felund-Ts| > 300s`
-- [ ] Return `401 {code: INVALID_SIGNATURE}` for bad signatures
-- [ ] Return `409 {code: NONCE_REPLAY}` for duplicate nonces
-- [ ] Return `400 {code: EXPIRED_TIMESTAMP}` for stale timestamps
+- [x] Add signature verification to [api/php/rendezvous.php](../api/php/rendezvous.php)
+  - Verification model: client registers with `signing_key` (derived from circle secret); server stores it and verifies all subsequent requests using the stored key
+- [x] Add nonce deduplication cache (`nonces` table, 5-minute TTL)
+- [x] Enforce timestamp window: reject requests where `|server_time - X-Felund-Ts| > 300s`
+- [x] Return `401 {code: INVALID_SIGNATURE}` for bad signatures
+- [x] Return `409 {code: NONCE_REPLAY}` for duplicate nonces
+- [x] Return `400 {code: EXPIRED_TIMESTAMP}` for stale timestamps
 
 ### Verification
 

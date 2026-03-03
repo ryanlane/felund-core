@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,20 +19,73 @@ def circle_hint(circle_id: str) -> str:
     return sha256_hex(circle_id.encode("utf-8"))[:16]
 
 
+# ── Request signing ───────────────────────────────────────────────────────────
+
+def _signing_key_bytes(circle_secret_hex: str) -> bytes:
+    """Derive the API signing key: HMAC-SHA256(circle_secret, b"api-v1").
+
+    The signing key is a one-way transform of the circle secret. It is safe to
+    send to the server during registration so the server can store it and verify
+    subsequent requests — the circle secret itself is never transmitted.
+    """
+    return hmac.new(bytes.fromhex(circle_secret_hex), b"api-v1", hashlib.sha256).digest()
+
+
+def sign_request(
+    circle_secret_hex: str,
+    method: str,
+    path: str,
+    body_bytes: bytes,
+    ts: int,
+    nonce: str,
+) -> str:
+    """Return hex HMAC-SHA256 signature for a canonical API request.
+
+    Canonical string: METHOD + path + sha256(body_bytes).hex() + str(ts) + nonce
+    Signing key:      HMAC-SHA256(circle_secret_bytes, b"api-v1")
+    """
+    key = _signing_key_bytes(circle_secret_hex)
+    body_hash = hashlib.sha256(body_bytes).hexdigest()
+    canonical = f"{method.upper()}{path}{body_hash}{ts}{nonce}"
+    return hmac.new(key, canonical.encode(), hashlib.sha256).hexdigest()
+
+
+def _build_auth_headers(
+    circle_secret_hex: str,
+    node_id: str,
+    method: str,
+    path: str,
+    body_bytes: bytes,
+) -> dict:
+    """Build the four Felund auth headers for an outbound API request."""
+    ts = int(time.time())
+    nonce = os.urandom(16).hex()
+    sig = sign_request(circle_secret_hex, method, path, body_bytes, ts, nonce)
+    return {
+        "X-Felund-Node": node_id,
+        "X-Felund-Ts": str(ts),
+        "X-Felund-Nonce": nonce,
+        "X-Felund-Signature": sig,
+    }
+
+
+# ── HTTP helpers ──────────────────────────────────────────────────────────────
+
+def _encode_body(data: dict) -> bytes:
+    return json.dumps(data, separators=(",", ":")).encode("utf-8")
+
+
 def _api_request(
     method: str,
     url: str,
-    body: Optional[dict] = None,
+    body_bytes: Optional[bytes] = None,
     headers: Optional[dict] = None,
     timeout: int = 8,
 ) -> dict:
-    raw = None
     request_headers = {"content-type": "application/json"}
     if headers:
         request_headers.update(headers)
-    if body is not None:
-        raw = json.dumps(body, separators=(",", ":")).encode("utf-8")
-    req = urllib.request.Request(url=url, data=raw, headers=request_headers, method=method)
+    req = urllib.request.Request(url=url, data=body_bytes, headers=request_headers, method=method)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         payload = resp.read().decode("utf-8")
         if not payload:
@@ -36,11 +93,14 @@ def _api_request(
         return json.loads(payload)
 
 
+# ── Presence ──────────────────────────────────────────────────────────────────
+
 def register_presence(api_base: str, state: State, circle_id: str, ttl_s: int = 120) -> None:
     listen_addr = public_addr_hint(state.node.bind, state.node.port)
     host, port = parse_hostport(listen_addr)
+    circle = state.circles.get(circle_id)
 
-    payload = {
+    payload: dict = {
         "node_id": state.node.node_id,
         "circle_hint": circle_hint(circle_id),
         "endpoints": [
@@ -59,8 +119,18 @@ def register_presence(api_base: str, state: State, circle_id: str, ttl_s: int = 
         },
         "ttl_s": ttl_s,
     }
-    headers = {"X-Felund-Node": state.node.node_id}
-    _api_request("POST", f"{api_base}/v1/register", payload, headers=headers)
+    if circle:
+        # Include the signing key so the server can store and verify future requests.
+        payload["signing_key"] = _signing_key_bytes(circle.secret_hex).hex()
+
+    body_bytes = _encode_body(payload)
+    if circle:
+        headers = _build_auth_headers(
+            circle.secret_hex, state.node.node_id, "POST", "/register", body_bytes
+        )
+    else:
+        headers = {"X-Felund-Node": state.node.node_id}
+    _api_request("POST", f"{api_base}/v1/register", body_bytes, headers=headers)
 
 
 def unregister_presence(api_base: str, state: State, circle_id: str) -> None:
@@ -68,7 +138,15 @@ def unregister_presence(api_base: str, state: State, circle_id: str) -> None:
         "node_id": state.node.node_id,
         "circle_hint": circle_hint(circle_id),
     }
-    _api_request("DELETE", f"{api_base}/v1/register", payload)
+    body_bytes = _encode_body(payload)
+    circle = state.circles.get(circle_id)
+    if circle:
+        headers = _build_auth_headers(
+            circle.secret_hex, state.node.node_id, "DELETE", "/register", body_bytes
+        )
+    else:
+        headers = {"X-Felund-Node": state.node.node_id}
+    _api_request("DELETE", f"{api_base}/v1/register", body_bytes, headers=headers)
 
 
 def lookup_peer_addrs(
@@ -79,7 +157,13 @@ def lookup_peer_addrs(
 ) -> List[Tuple[str, str]]:
     query = urllib.parse.urlencode({"circle_hint": circle_hint(circle_id), "limit": limit})
     url = f"{api_base}/v1/peers?{query}"
-    headers = {"X-Felund-Node": state.node.node_id}
+    circle = state.circles.get(circle_id)
+    if circle:
+        headers = _build_auth_headers(
+            circle.secret_hex, state.node.node_id, "GET", "/peers", b""
+        )
+    else:
+        headers = {"X-Felund-Node": state.node.node_id}
     data = _api_request("GET", url, headers=headers)
 
     out: List[Tuple[str, str]] = []
@@ -124,6 +208,8 @@ def merge_discovered_peers(state: State, circle_id: str, peer_addrs: List[Tuple[
     return changed
 
 
+# ── Relay messages ────────────────────────────────────────────────────────────
+
 def push_messages_to_relay(api_base: str, state: State, circle_id: str) -> int:
     """Push local messages for *circle_id* to the relay server.
 
@@ -160,7 +246,11 @@ def push_messages_to_relay(api_base: str, state: State, circle_id: str) -> int:
                 for m in batch
             ],
         }
-        data = _api_request("POST", f"{api_base}/v1/messages", payload)
+        body_bytes = _encode_body(payload)
+        headers = _build_auth_headers(
+            circle.secret_hex, state.node.node_id, "POST", "/messages", body_bytes
+        )
+        data = _api_request("POST", f"{api_base}/v1/messages", body_bytes, headers=headers)
         stored_total += data.get("stored", 0)
     return stored_total
 
@@ -178,7 +268,14 @@ def pull_messages_from_relay(
     """
     hint = circle_hint(circle_id)
     query = urllib.parse.urlencode({"circle_hint": hint, "since": since, "limit": 200})
-    data = _api_request("GET", f"{api_base}/v1/messages?{query}")
+    circle = state.circles.get(circle_id)
+    if circle:
+        headers = _build_auth_headers(
+            circle.secret_hex, state.node.node_id, "GET", "/messages", b""
+        )
+    else:
+        headers = {}
+    data = _api_request("GET", f"{api_base}/v1/messages?{query}", headers=headers)
     return data.get("messages", []), int(data.get("server_time", 0))
 
 
