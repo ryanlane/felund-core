@@ -70,7 +70,7 @@ def _log(message: str) -> None:
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-Felund-Node",
+    "Access-Control-Allow-Headers": "Content-Type, X-Felund-Node, X-Felund-Ts, X-Felund-Nonce, X-Felund-Signature",
 }
 
 

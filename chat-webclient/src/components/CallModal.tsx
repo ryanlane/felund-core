@@ -77,7 +77,11 @@ export function CallModal({
 
   return (
     <div className="tui-modal-overlay" onClick={onClose}>
-      <div className="tui-modal tui-call-modal" onClick={(e) => e.stopPropagation()} data-testid="call-modal">
+      <div
+        className={`tui-modal tui-call-modal${isVideoOn || remoteVideo > 0 ? ' tui-call-modal--video' : ''}`}
+        onClick={(e) => e.stopPropagation()}
+        data-testid="call-modal"
+      >
         <div className="tui-modal-header">
           {amInCall ? '◈ Call' : amViewer ? '◉ Call (viewing)' : '◇ Call'}
           {activeCall && (
@@ -90,10 +94,10 @@ export function CallModal({
         <div className="tui-modal-body">
           {amInCall || amViewer ? (
             <>
-              {/* Video grid — shown when camera is on */}
-              {isVideoOn && (
+              {/* Video grid — shown when local camera is on or any remote peer is sharing video */}
+              {(isVideoOn || remoteVideo > 0) && (
                 <div className="tui-call-video-grid">
-                  {callManagerRef.current?.localStream && (
+                  {isVideoOn && callManagerRef.current?.localStream && (
                     <video
                       autoPlay
                       playsInline
@@ -106,18 +110,20 @@ export function CallModal({
                       className="tui-call-video tui-call-video-local"
                     />
                   )}
-                  {Object.entries(remoteStreams).map(([peerId, stream]) => (
-                    <video
-                      key={peerId}
-                      autoPlay
-                      playsInline
-                      data-testid="call-remote-video"
-                      ref={(el) => {
-                        if (el) el.srcObject = stream
-                      }}
-                      className="tui-call-video"
-                    />
-                  ))}
+                  {Object.entries(remoteStreams)
+                    .filter(([, stream]) => stream.getVideoTracks().length > 0)
+                    .map(([peerId, stream]) => (
+                      <video
+                        key={peerId}
+                        autoPlay
+                        playsInline
+                        data-testid="call-remote-video"
+                        ref={(el) => {
+                          if (el) el.srcObject = stream
+                        }}
+                        className="tui-call-video"
+                      />
+                    ))}
                 </div>
               )}
               {/* Participant list */}

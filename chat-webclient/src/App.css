@@ -556,6 +556,16 @@ kbd {
     padding: 0.4rem 0.6rem;
     font-size: 0.78rem;
   }
+  /* Full-screen call modal when video active on mobile */
+  .tui-call-modal--video {
+    width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+  }
+  /* Stack video tiles vertically on mobile so each is full-width */
+  .tui-call-modal--video .tui-call-video {
+    flex: 1 1 100%;
+  }
 }
 
 /* ── Help modal content ─────────────────────────────────────────────────── */
@@ -605,6 +615,30 @@ kbd {
 
 .tui-call-modal {
   width: min(520px, 94vw);
+}
+
+/* Video-active state: near-fullscreen on desktop, fullscreen on mobile */
+.tui-call-modal--video {
+  width: min(92vw, 1100px);
+  height: 90vh;
+  max-height: 90vh;
+  overflow: hidden;       /* modal itself fixed; body scrolls */
+  display: flex;
+  flex-direction: column;
+}
+
+.tui-call-modal--video .tui-modal-body {
+  flex: 1;
+  min-height: 0;          /* allow flex child to shrink below content size */
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.tui-call-modal--video .tui-call-video {
+  flex: 1 1 45%;
+  max-height: unset;
+  aspect-ratio: 16 / 9;
 }
 
 .tui-call-modal-participants {
