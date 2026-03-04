@@ -381,22 +381,15 @@ export class WebRTCCallManager {
       }
     }
 
-    // Only notify the UI when at least one track is genuinely new.
-    // During renegotiation, event.streams[0] contains all tracks (old + new),
-    // so ontrack would otherwise call onRemoteStream multiple times with the
-    // same stream object for tracks already connected to the UI.
     pc.ontrack = (event) => {
       if (this.stopped) return
-      const existing = new Set(remoteStream.getTracks().map((t) => t.id))
-      const tracks = event.streams[0] ? event.streams[0].getTracks() : [event.track]
-      let added = false
-      for (const track of tracks) {
-        if (!existing.has(track.id)) {
-          remoteStream.addTrack(track)
-          added = true
-        }
+      // event.track is always the specific new track; event.streams[0] can be
+      // an empty MediaStream during renegotiation in some browsers, so we
+      // never rely on it.
+      if (!remoteStream.getTrackById(event.track.id)) {
+        remoteStream.addTrack(event.track)
+        this.config.onRemoteStream(peerId, remoteStream)
       }
-      if (added) this.config.onRemoteStream(peerId, remoteStream)
     }
 
     // Perfect negotiation: either side may initiate renegotiation (e.g., when
